@@ -12,6 +12,7 @@ import contextlib
 import fnmatch
 import posixpath
 import re
+import string
 import subprocess
 from pathlib import Path
 
@@ -23,6 +24,7 @@ AGENTS = Path(__file__).resolve().parent.parent / "agents"
 SNAPSHOT_CHARS = 60_000  # ponytail: whole-file snapshot with a cap, no retrieval; add when repos outgrow it
 INTEGRATION = "foundry/integration"
 PROTECTED_DEFAULT = ["constitution.md", "spec.md", "plan.md", "tasks.md", "project.yaml", "agents/*", ".github/*", ".env*"]
+APPROVE_LINE = re.compile(r"^(?:verdict\s*:\s*)?approved?\b(?!.*\b(?:but|however|except|unless|although|not|changes|reject\w*)\b)")
 DIFF_BLOCK = re.compile(r"```(?:diff|patch)\n(.*?)\n```", re.S)
 
 
@@ -31,6 +33,14 @@ def _git(cwd: Path, *args: str, check: bool = True) -> str:
     if check and p.returncode != 0:
         raise AgentFailed(f"git {' '.join(args[:2])} failed: {(p.stderr or p.stdout)[:300]}")
     return p.stdout
+
+
+def parse_verdict(text: str) -> bool:
+    """True only for a clear APPROVE on the first non-empty line. Markdown emphasis and
+    surrounding punctuation are ignored; anything ambiguous is not approved."""
+    line = next((l for l in text.splitlines() if l.strip()), "")
+    line = re.sub(r"[*`_]", "", line).strip().strip(string.punctuation + string.whitespace).casefold()
+    return bool(APPROVE_LINE.match(line))
 
 
 def _slug(text: str) -> str:
@@ -151,7 +161,13 @@ class Runners:
                          task=self._task_text(task), diff=diff),
             bounded=False,
         ).text
-        return text.lstrip().upper().startswith("APPROVE"), text
+        if parse_verdict(text):
+            return True, text
+        first = next((l for l in text.splitlines() if l.strip()), "").strip()
+        if re.sub(r"[*`_]", "", first).strip(string.punctuation + " ").casefold().startswith("verdict: changes requested"):
+            return False, text
+        return False, ("Reviewer reply had no clear verdict (first line must be `VERDICT: APPROVE` or "
+                       f"`VERDICT: CHANGES REQUESTED`), so it counts as not approved. Raw reply:\n{text}")
 
     def playwright(self, task: Task, branch: str) -> tuple[bool, str]:
         if self.cfg.get("has_ui"):

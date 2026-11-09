@@ -177,3 +177,35 @@ def test_cli_no_wait_exits_2_on_pause_and_persists_state(proj):
     assert st["paused_task"] == "T-001" and st["resume_at"] > 0 and st["tier"] == "fallback"
     assert parse_tasks((proj / "tasks.md").read_text())[0].status == "open"
     assert "- paused: 1 (T-001)" in (proj / "logs" / "status.md").read_text()
+
+
+# verdict parsing
+
+from foundry.runners import parse_verdict  # noqa: E402
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("VERDICT: APPROVE\nLooks good.", True),
+    ("**APPROVE**", True),
+    ("**VERDICT: APPROVE**\n\nreason", True),
+    ("`Approve`", True),
+    ("\n\n  _Approve._ Tests cover every criterion.", True),
+    ("Approve.\n\nThe diff satisfies the task.", True),
+    ("VERDICT: CHANGES REQUESTED\n1. hello.py:3 missing test", False),
+    ("**CHANGES REQUESTED**\n1. fix", False),
+    ("Approve, but add a test", False),
+    ("I reviewed the diff and it looks fine. APPROVE", False),
+    ("", False),
+    ("Looks good to me", False),
+    ("Not approved", False),
+])
+def test_parse_verdict(text, expected):
+    assert parse_verdict(text) is expected
+
+
+def test_reviewer_unparseable_reply_is_not_approved_and_notes_keep_raw_text(proj):
+    dev, _ = runners(proj, lambda p: DIFF)
+    branch = dev.developer(task(proj))
+    r, _ = runners(proj, lambda p: "Hmm, hard to say.")
+    ok, notes = r.reviewer(task(proj), branch)
+    assert ok is False and "no clear verdict" in notes and "Hmm, hard to say." in notes

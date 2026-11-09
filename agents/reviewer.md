@@ -17,9 +17,15 @@ Review one branch against the task, the spec, and the constitution. Fresh contex
 5. Bugs, unsafe code, leaked secrets, new dependencies.
 
 ## Outputs
-One of:
-- `APPROVE`, with a one line reason
-- `CHANGES REQUESTED`, with a numbered list of specific fixes, each pointing to a file and line
+The FIRST line of the reply must be exactly one of these two lines, nothing before it:
+- `VERDICT: APPROVE`
+- `VERDICT: CHANGES REQUESTED`
+
+Then, starting on the next line:
+- After APPROVE, a one line reason.
+- After CHANGES REQUESTED, a numbered list of specific fixes, each pointing to a file and line.
+
+A reply whose first line is anything else is treated as not approved.
 
 ## Must refuse
 - Approving a diff with a missing test or a failing check.
