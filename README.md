@@ -48,15 +48,15 @@ This copies the templates into the project and writes a `project.yaml` you fill 
 ```
 agents/       role files, one per agent
 templates/    constitution, spec, plan, tasks, project.yaml
-foundry/      wrapper (tiers, probe, logging), tasks parser, orchestrator loop
-scripts/      init_project.py
+foundry/      wrapper (tiers, probe, logging), adapters, tasks parser, orchestrator loop
+scripts/      init_project.py, smoke_adapters.py
 tests/        wrapper and parser tests, including a fake 429 test
 examples/     worked example (spanslo)
 ```
 
 ## Status
 
-Scaffold. The wrapper, task parser, and orchestrator loop are implemented and tested with fake providers. The real Claude and Gemini Flash adapters are not wired yet: pass your own callables to `ModelWrapper`.
+Scaffold. The wrapper, task parser, and orchestrator loop are implemented and tested with fake providers. Real adapters are in `foundry/adapters.py`: `claude_cli` (primary), `agy_cli` (default fallback, Gemini Flash through the `agy` CLI in plan mode) and `gemini_api` (optional, REST, needs `GEMINI_API_KEY`). Pick the fallback with `models.fallback_provider` in `project.yaml`; rate limit regexes live under `rate_limit_patterns`. `python scripts/smoke_adapters.py` makes one real call per tier.
 
 ## Rules
 

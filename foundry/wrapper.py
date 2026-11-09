@@ -5,7 +5,9 @@ Tier 2: fallback model (Gemini Flash), bounded tasks only, only after tier 1 is 
 Tier 3: pause. State is saved with resume_at. Later calls probe tier 1 and resume.
 
 Providers are plain callables: provider(prompt) -> str. They raise RateLimited on a limit error.
-Real Claude and Gemini adapters are not included. Pass your own callables.
+Real adapters live in foundry/adapters.py (claude_cli, agy_cli, gemini_api). Providers raise
+RateLimited only for limits; any other failure raises adapters.ProviderError, which this wrapper
+does not catch, so it never triggers the fallback.
 State lives in a small JSON file, so any process can resume after a restart.
 """
 
