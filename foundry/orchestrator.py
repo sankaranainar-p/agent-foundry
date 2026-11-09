@@ -46,6 +46,7 @@ def run_task(
     reviewer: Reviewer,
     tester: Tester,
     retry_cap: int = 3,
+    merger: Optional[Callable[[Task, str], tuple[bool, str]]] = None,
 ) -> Outcome:
     notes = ""
     for attempt in range(1, retry_cap + 1):
@@ -57,6 +58,10 @@ def run_task(
             passed, notes = tester(task, work)
             if not passed:
                 continue
+            if merger:  # the orchestrator merges, and only after review and tests pass
+                merged, merge_notes = merger(task, work)
+                if not merged:
+                    return Outcome(task.id, "blocked", attempt, merge_notes)
             return Outcome(task.id, "done", attempt)
         except AgentFailed as e:
             notes = str(e)
@@ -75,6 +80,7 @@ def run_queue(
     retry_cap: int = 3,
     begin_task: Optional[Callable[[str], None]] = None,
     after_task: Optional[Callable[[Task, Outcome], None]] = None,
+    merger: Optional[Callable[[Task, str], tuple[bool, str]]] = None,
 ) -> list[Outcome]:
     """Work open tasks in order. Stops on a pause so the caller can sleep until resume_at.
 
@@ -89,7 +95,7 @@ def run_queue(
             return outcomes
         if begin_task:
             begin_task(task.id)
-        outcome = run_task(task, developer, reviewer, tester, retry_cap)
+        outcome = run_task(task, developer, reviewer, tester, retry_cap, merger)
         if outcome.status == "restart":
             continue  # tier switched; begin_task applies it on the rerun
         outcomes.append(outcome)
@@ -127,7 +133,7 @@ def run_until_done(
             slept = True
 
 
-def write_status(path: str | Path, tasks_text: str, state: dict) -> None:
+def write_status(path: str | Path, tasks_text: str, state: dict, extra: tuple[str, ...] = ()) -> None:
     """logs/status.md: counts, current task, active tier, resume_at."""
     tasks = parse_tasks(tasks_text)
     count = lambda st: sum(t.status == st for t in tasks)  # noqa: E731
@@ -143,6 +149,7 @@ def write_status(path: str | Path, tasks_text: str, state: dict) -> None:
         f"- current task: {state.get('current_task') or 'none'}",
         f"- active tier: {state.get('tier')}",
         f"- resume_at: {resume_s}",
+        *[f"- {line}" for line in extra],
         "",
     ]
     p = Path(path)

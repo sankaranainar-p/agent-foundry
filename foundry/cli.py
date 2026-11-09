@@ -44,16 +44,17 @@ def main(argv=None, providers=None) -> int:
         print(f"wrote {out}. Review it, then move it over tasks.md to approve.")
         return 0
 
+    runners.ensure_integration()
     tasks_path, status_path = project / "tasks.md", project / "logs" / "status.md"
 
     def after(task, outcome):
         wrapper.set_meta(paused_task=task.id if outcome.status == "paused" else "")
-        write_status(status_path, tasks_path.read_text(), wrapper.snapshot())
+        write_status(status_path, tasks_path.read_text(), wrapper.snapshot(), (runners.integration_line(),))
 
     run_once = lambda: run_queue(  # noqa: E731
         tasks_path, runners.developer, runners.reviewer, runners.playwright,
         retry_cap=cfg.get("limits", {}).get("review_retry_cap", 3),
-        begin_task=wrapper.begin_task, after_task=after,
+        begin_task=wrapper.begin_task, after_task=after, merger=runners.merge,
     )
     outcomes = run_until_done(run_once, lambda: wrapper.snapshot()["resume_at"], wrapper.probe_interval,
                               wait=not args.no_wait)
