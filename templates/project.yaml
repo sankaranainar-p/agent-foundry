@@ -37,3 +37,15 @@ rate_limit_patterns:
     - "quota"
     - "rate limit"
     - "\\b429\\b"
+
+# Developer diffs that touch these paths are rejected. fnmatch patterns, case insensitive,
+# matched against the full path and the file name. Setting this replaces the defaults.
+protected_paths:
+  - constitution.md
+  - spec.md
+  - plan.md
+  - tasks.md
+  - project.yaml
+  - "agents/*"
+  - ".github/*"
+  - ".env*"
