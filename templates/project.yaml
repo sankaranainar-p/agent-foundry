@@ -5,6 +5,7 @@ commands:
   build: ""        # for example: pip install -e .
   test: ""         # for example: pytest
   run: ""          # for example: python -m myapp   (used by the Playwright agent)
+  smoke: ""         # used when has_ui is false: exits 0 on pass, for example: python -m myapp --selftest
 
 has_ui: false      # true: Playwright browser flows. false: scripted smoke test.
 base_url: ""       # only when has_ui is true, for example http://localhost:3000

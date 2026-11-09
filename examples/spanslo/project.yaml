@@ -6,6 +6,7 @@ commands:
   build: ""   # TODO
   test: ""    # TODO
   run: ""     # TODO
+  smoke: ""         # used when has_ui is false: exits 0 on pass, for example: python -m myapp --selftest
 
 has_ui: false   # TODO: set true if spanslo gets a web dashboard. This decides if Playwright applies.
 base_url: ""
