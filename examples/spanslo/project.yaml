@@ -12,7 +12,8 @@ base_url: ""
 
 models:
   primary: claude
-  fallback: gemini-flash
+  fallback: gemini-3.8-flash    # model name is config, swap it any time. agy and the REST API both accept it
+  fallback_provider: agy        # agy | gemini-api (gemini-api needs GEMINI_API_KEY in the environment)
   fallback_allowed_for:
     - tests
     - docs
@@ -22,3 +23,17 @@ limits:
   review_retry_cap: 3
   probe_interval_minutes: 20
   default_cooldown_minutes: 300
+
+# Regexes (case insensitive) matched against error output only. A match means rate limited.
+# Anything else that fails is a hard error and does not trigger the fallback.
+rate_limit_patterns:
+  claude:
+    - "hit your limit"
+    - "usage limit"
+    - "rate limit"
+    - "limit reached"
+  agy:
+    - "RESOURCE_EXHAUSTED"
+    - "quota"
+    - "rate limit"
+    - "\\b429\\b"
