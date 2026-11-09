@@ -1,0 +1,24 @@
+# Worked example: spanslo, the pilot project.
+# Copy this into the spanslo repo and fill in the TODOs after the design phase.
+name: spanslo
+
+commands:
+  build: ""   # TODO
+  test: ""    # TODO
+  run: ""     # TODO
+
+has_ui: false   # TODO: set true if spanslo gets a web dashboard. This decides if Playwright applies.
+base_url: ""
+
+models:
+  primary: claude
+  fallback: gemini-flash
+  fallback_allowed_for:
+    - tests
+    - docs
+    - small-fixes
+
+limits:
+  review_retry_cap: 3
+  probe_interval_minutes: 20
+  default_cooldown_minutes: 300
