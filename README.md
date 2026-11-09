@@ -1,5 +1,7 @@
 # agent-foundry
 
+[![tests](https://github.com/sankaranainar-p/agent-foundry/actions/workflows/tests.yml/badge.svg)](https://github.com/sankaranainar-p/agent-foundry/actions/workflows/tests.yml)
+
 A generic, spec-driven software factory for AI agents. A reviewed spec goes in. Verified code comes out.
 
 Design and analysis happen up front with [EGM](https://github.com/google/elephant-goldfish-model) (elephant and goldfish) and, optionally, GitHub Spec Kit. Then a pipeline of agents builds, reviews, tests, and audits the work, and survives rate limits without losing state.
