@@ -66,10 +66,12 @@ python -m foundry run <project_dir> [--no-wait] # works the queue; sleeps throug
 ```
 
 - Tiers change only between tasks. A limit hit mid-task restarts the task on the new tier; a fallback task never returns to Claude until the next task.
-- The developer asks the model for a unified diff, applies it with `git apply`, and commits on a branch named after the task ID. It never merges. Flash commits end with `[flash]`.
+- The developer asks the model for a unified diff and applies it with `git apply`. Every task branch starts from the tip of `foundry/integration` (created from your current branch on the first run). The developer prompt snapshot and the reviewer diff both come from that tip.
+- After review and the smoke test pass, the orchestrator merges the task branch into `foundry/integration` with `--no-ff`, then marks the task done. A merge conflict blocks the task and records the conflict text. Nothing is ever merged into your base branch or main: you review `foundry/integration` and merge it yourself.
+- Diffs that touch `protected_paths` (default: constitution, spec, plan, tasks, project.yaml, `agents/`, `.github/`, `.env*`) are rejected before any branch is created, and the paths go back to the developer as notes. Flash commits end with `[flash]`.
 - A pause keeps the task open. State is in `logs/state.json`; `logs/status.md` is rewritten after every task.
 - Playwright: only `has_ui: false` works (runs `commands.smoke`, saves output under `logs/evidence/<task-id>/`). `has_ui: true` raises `NotImplementedError`.
-- Not done: the developer does not run `commands.test` itself, the gap analyzer has no CLI command, and `python scripts/smoke_adapters.py` makes one real call per tier.
+- Not done: a crash between the merge and the status write leaves a merged task open (its rerun then fails to apply and blocks); the developer does not run `commands.test` itself, the gap analyzer has no CLI command, and `python scripts/smoke_adapters.py` makes one real call per tier.
 
 ## Rules
 
