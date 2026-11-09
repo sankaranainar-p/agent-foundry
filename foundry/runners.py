@@ -12,9 +12,11 @@ import contextlib
 import fnmatch
 import posixpath
 import re
+import shutil
 import string
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from .orchestrator import AgentFailed
 from .tasks import Task
@@ -52,8 +54,20 @@ class Runners:
         self.dir = Path(project_dir)
         self.wrapper = wrapper
         self.cfg = cfg
+        self._attempt_dir: Optional[Path] = None
         self.integ = INTEGRATION
         self.base = _git(self.dir, "rev-parse", "--abbrev-ref", "HEAD").strip() if (self.dir / ".git").exists() else ""
+
+    # per attempt logs: logs/<task-id>/attempt-<n>/
+
+    def set_attempt(self, task_id: str, n: int) -> None:
+        self._attempt_dir = self.dir / "logs" / task_id / f"attempt-{n}"
+        shutil.rmtree(self._attempt_dir, ignore_errors=True)  # a rerun must not leave stale files
+        self._attempt_dir.mkdir(parents=True)
+
+    def record(self, name: str, text: str) -> None:
+        if self._attempt_dir:
+            (self._attempt_dir / name).write_text(text)
 
     # prompt building
 
@@ -135,6 +149,7 @@ class Runners:
                           "git apply compatible), then a one paragraph note. No other code blocks.",
         )
         result = self.wrapper.call(prompt, bounded=task.bounded)
+        self.record("developer-reply.md", result.text)
         m = DIFF_BLOCK.search(result.text)
         if not m:
             raise AgentFailed("no ```diff block in the developer reply")
@@ -143,6 +158,7 @@ class Runners:
         patch = self.dir / "logs" / f"{task.id}.patch"
         patch.parent.mkdir(exist_ok=True)
         patch.write_text(m.group(1) + "\n")
+        self.record("diff.patch", m.group(1) + "\n")
         if hits := self._protected_hits(patch):
             raise AgentFailed(f"diff touches protected paths, remove these changes: {', '.join(hits)}")
         # A retry starts a fresh branch from the integration tip: the prompt snapshot is the tip, so the diff must be too.
@@ -161,6 +177,7 @@ class Runners:
                          task=self._task_text(task), diff=diff),
             bounded=False,
         ).text
+        self.record("reviewer-reply.md", text)
         if parse_verdict(text):
             return True, text
         first = next((l for l in text.splitlines() if l.strip()), "").strip()
@@ -177,12 +194,13 @@ class Runners:
             raise AgentFailed("commands.smoke is empty in project.yaml")
         with self._on_branch(branch):
             p = subprocess.run(cmd, shell=True, cwd=self.dir, capture_output=True, text=True)
+        self.record("smoke.txt", f"$ {cmd}\nexit code: {p.returncode}\n--- stdout\n{p.stdout}\n--- stderr\n{p.stderr}")
         ev = self.dir / "logs" / "evidence" / task.id
         ev.mkdir(parents=True, exist_ok=True)
         (ev / "stdout.txt").write_text(p.stdout)
         (ev / "stderr.txt").write_text(p.stderr)
         (ev / "exit_code.txt").write_text(f"{p.returncode}\n")
-        return p.returncode == 0, f"smoke exit {p.returncode}; evidence in {ev}\n{p.stderr[-500:]}"
+        return p.returncode == 0, f"smoke exit {p.returncode}; evidence in {ev}\n{(p.stdout + p.stderr)[-1500:]}"
 
     def merge(self, task: Task, branch: str) -> tuple[bool, str]:
         """Called by the orchestrator, never by an agent. Merges into foundry/integration only."""

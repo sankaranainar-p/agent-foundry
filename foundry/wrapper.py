@@ -41,13 +41,19 @@ class TierChanged(Exception):
     """Primary hit a limit in the middle of a task. The tier switch is saved and takes effect at
     the next begin_task(), so the caller restarts the task."""
 
+    def __init__(self, resume_at: float, reason: str = ""):
+        super().__init__(f"{reason}, resume_at={resume_at}")
+        self.resume_at = resume_at
+        self.reason = reason
+
 
 class Paused(Exception):
     """Raised when no allowed tier is available. The orchestrator should sleep until resume_at."""
 
-    def __init__(self, resume_at: float):
-        super().__init__(f"paused until {resume_at}")
+    def __init__(self, resume_at: float, reason: str = ""):
+        super().__init__(f"paused until {resume_at}" + (f" ({reason})" if reason else ""))
         self.resume_at = resume_at
+        self.reason = reason
 
 
 @dataclass
@@ -144,7 +150,7 @@ class ModelWrapper:
                 self._save(state)
                 self._log({"event": "rate_limited", "tier": TIER_PRIMARY, "resume_at": state["resume_at"]})
                 if pinned:
-                    raise TierChanged(f"primary limited mid-task, resume_at={state['resume_at']}")
+                    raise TierChanged(state["resume_at"], "primary rate limited mid-task")
                 return self._call_fallback(prompt, bounded, state)
             self._save(state)
             self._log({"event": "call", "tier": TIER_PRIMARY, "model": self.primary_name})
@@ -175,7 +181,7 @@ class ModelWrapper:
         if not bounded:
             # Unbounded work waits for the primary model. It never runs on the fallback.
             self._log({"event": "paused", "reason": "unbounded task, primary limited"})
-            raise Paused(state["resume_at"])
+            raise Paused(state["resume_at"], "unbounded task, primary limited")
         try:
             text = self.fallback(prompt)
         except RateLimited as err:
@@ -183,7 +189,7 @@ class ModelWrapper:
             state["resume_at"] = max(state["resume_at"], self.clock() + wait)
             self._save(state)
             self._log({"event": "paused", "reason": "fallback limited", "resume_at": state["resume_at"]})
-            raise Paused(state["resume_at"])
+            raise Paused(state["resume_at"], "fallback limited")
         state["flash_commits"] = state.get("flash_commits", 0) + 1
         self._save(state)
         self._log({"event": "call", "tier": TIER_FALLBACK, "model": self.fallback_name})

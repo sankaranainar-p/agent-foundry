@@ -40,6 +40,10 @@ class Outcome:
     notes: str = ""
 
 
+def _ts(t: float) -> str:
+    return dt.datetime.fromtimestamp(t).astimezone().isoformat(timespec="seconds")
+
+
 def run_task(
     task: Task,
     developer: Developer,
@@ -47,28 +51,51 @@ def run_task(
     tester: Tester,
     retry_cap: int = 3,
     merger: Optional[Callable[[Task, str], tuple[bool, str]]] = None,
+    on_attempt: Optional[Callable[[Task, int], None]] = None,
+    emit: Callable[[str], None] = lambda msg: None,
+    record: Callable[[str, str], None] = lambda name, text: None,
 ) -> Outcome:
+    """on_attempt(task, n) runs at the start of each attempt, emit(msg) reports progress, and
+    record(name, text) saves a file for the current attempt (notes.txt holds the attempt's
+    end notes, so a blocked task's reason is its last attempt's notes.txt)."""
     notes = ""
     for attempt in range(1, retry_cap + 1):
+        if on_attempt:
+            on_attempt(task, attempt)
+        stage = "developer"
         try:
             work = developer(task, notes)
+            emit(f"  developer ok ({work})")
+            stage = "reviewer"
             approved, notes = reviewer(task, work)
             if not approved:
+                emit(f"  reviewer: not approved ({notes.strip().splitlines()[0][:100] if notes.strip() else 'empty reply'})")
+                record("notes.txt", notes)
                 continue
+            emit("  reviewer: approved")
+            stage = "smoke"
             passed, notes = tester(task, work)
+            emit(f"  smoke: {'pass' if passed else 'fail'}")
             if not passed:
+                record("notes.txt", notes)
                 continue
             if merger:  # the orchestrator merges, and only after review and tests pass
+                stage = "merge"
                 merged, merge_notes = merger(task, work)
                 if not merged:
+                    record("notes.txt", merge_notes)
                     return Outcome(task.id, "blocked", attempt, merge_notes)
+                emit("  merged into integration branch")
             return Outcome(task.id, "done", attempt)
         except AgentFailed as e:
             notes = str(e)
-        except TierChanged:
-            return Outcome(task.id, "restart", attempt)
+            emit(f"  {stage} failed: {notes}")
+            record("failure.txt", notes)
+            record("notes.txt", notes)
+        except TierChanged as e:
+            return Outcome(task.id, "restart", attempt, f"{e.reason}; resume_at={_ts(e.resume_at)}")
         except Paused as p:
-            return Outcome(task.id, "paused", attempt, f"resume_at={p.resume_at}")
+            return Outcome(task.id, "paused", attempt, f"{p.reason or 'rate limited'}; resume_at={_ts(p.resume_at)}")
     return Outcome(task.id, "blocked", retry_cap, notes)
 
 
@@ -81,8 +108,13 @@ def run_queue(
     begin_task: Optional[Callable[[str], None]] = None,
     after_task: Optional[Callable[[Task, Outcome], None]] = None,
     merger: Optional[Callable[[Task, str], tuple[bool, str]]] = None,
+    keep_going: bool = False,
+    on_attempt: Optional[Callable[[Task, int], None]] = None,
+    emit: Callable[[str], None] = lambda msg: None,
+    record: Callable[[str, str], None] = lambda name, text: None,
 ) -> list[Outcome]:
-    """Work open tasks in order. Stops on a pause so the caller can sleep until resume_at.
+    """Work open tasks in order. Stops on a pause so the caller can sleep until resume_at, and
+    on a blocked task unless keep_going (later tasks may depend on it; they stay open).
 
     begin_task(task_id) runs before each task (wrapper.begin_task: the only place tiers change).
     after_task(task, outcome) runs after each task, including a pause (status report)."""
@@ -92,18 +124,27 @@ def run_queue(
         text = path.read_text()
         task = next_open_task(parse_tasks(text))
         if task is None:
+            if not outcomes:
+                emit(f"no open tasks in {path}")
             return outcomes
         if begin_task:
             begin_task(task.id)
-        outcome = run_task(task, developer, reviewer, tester, retry_cap, merger)
+        outcome = run_task(task, developer, reviewer, tester, retry_cap, merger, on_attempt, emit, record)
         if outcome.status == "restart":
+            emit(f"{task.id} tier changed ({outcome.notes}); restarting the task")
             continue  # tier switched; begin_task applies it on the rerun
         outcomes.append(outcome)
         if outcome.status != "paused":
             path.write_text(set_status(text, task.id, outcome.status))
         if after_task:
             after_task(task, outcome)
-        if outcome.status == "paused":
+        if outcome.status == "done":
+            emit(f"{task.id} done")
+        elif outcome.status == "blocked":
+            emit(f"{task.id} blocked: {outcome.notes[:500]}")
+        else:
+            emit(f"{task.id} paused: {outcome.notes}")
+        if outcome.status == "paused" or (outcome.status == "blocked" and not keep_going):
             return outcomes
 
 
@@ -138,7 +179,7 @@ def write_status(path: str | Path, tasks_text: str, state: dict, extra: tuple[st
     tasks = parse_tasks(tasks_text)
     count = lambda st: sum(t.status == st for t in tasks)  # noqa: E731
     resume = state.get("resume_at") or 0
-    resume_s = dt.datetime.fromtimestamp(resume).astimezone().isoformat(timespec="seconds") if resume else "none"
+    resume_s = _ts(resume) if resume else "none"
     lines = [
         "# Factory status",
         "",
