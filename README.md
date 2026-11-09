@@ -50,7 +50,7 @@ This copies the templates into the project and writes a `project.yaml` you fill 
 ```
 agents/       role files, one per agent
 templates/    constitution, spec, plan, tasks, project.yaml
-foundry/      wrapper (tiers, probe, logging), adapters, tasks parser, orchestrator loop
+foundry/      wrapper (tiers, probe, logging), adapters, runners, cli, tasks parser, orchestrator loop
 scripts/      init_project.py, smoke_adapters.py
 tests/        wrapper and parser tests, including a fake 429 test
 examples/     worked example (spanslo)
@@ -58,7 +58,18 @@ examples/     worked example (spanslo)
 
 ## Status
 
-Scaffold. The wrapper, task parser, and orchestrator loop are implemented and tested with fake providers. Real adapters are in `foundry/adapters.py`: `claude_cli` (primary), `agy_cli` (default fallback, Gemini Flash through the `agy` CLI in plan mode) and `gemini_api` (optional, REST, needs `GEMINI_API_KEY`). Pick the fallback with `models.fallback_provider` in `project.yaml`; rate limit regexes live under `rate_limit_patterns`. `python scripts/smoke_adapters.py` makes one real call per tier.
+Runnable, not yet proven on a real project. Implemented and tested with fake providers: the wrapper, task parser, orchestrator loop, real adapters (`foundry/adapters.py`: `claude_cli`, `agy_cli`, `gemini_api`, picked by `models.fallback_provider`), and one runner per agent (`foundry/runners.py`).
+
+```bash
+python -m foundry plan <project_dir>            # writes tasks.proposed.md; you approve by moving it over tasks.md
+python -m foundry run <project_dir> [--no-wait] # works the queue; sleeps through rate limits unless --no-wait
+```
+
+- Tiers change only between tasks. A limit hit mid-task restarts the task on the new tier; a fallback task never returns to Claude until the next task.
+- The developer asks the model for a unified diff, applies it with `git apply`, and commits on a branch named after the task ID. It never merges. Flash commits end with `[flash]`.
+- A pause keeps the task open. State is in `logs/state.json`; `logs/status.md` is rewritten after every task.
+- Playwright: only `has_ui: false` works (runs `commands.smoke`, saves output under `logs/evidence/<task-id>/`). `has_ui: true` raises `NotImplementedError`.
+- Not done: the developer does not run `commands.test` itself, the gap analyzer has no CLI command, and `python scripts/smoke_adapters.py` makes one real call per tier.
 
 ## Rules
 
