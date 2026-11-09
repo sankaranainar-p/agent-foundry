@@ -1,6 +1,6 @@
 """agent-foundry: spec-driven software factory for AI agents."""
 
-from .wrapper import CallResult, ModelWrapper, Paused, RateLimited
+from .wrapper import CallResult, ModelWrapper, Paused, RateLimited, TierChanged
 from .tasks import Task, next_open_task, parse_tasks, set_status
 
 __all__ = [
@@ -8,6 +8,7 @@ __all__ = [
     "ModelWrapper",
     "Paused",
     "RateLimited",
+    "TierChanged",
     "Task",
     "next_open_task",
     "parse_tasks",

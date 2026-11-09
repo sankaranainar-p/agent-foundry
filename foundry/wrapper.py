@@ -8,6 +8,10 @@ Providers are plain callables: provider(prompt) -> str. They raise RateLimited o
 Real adapters live in foundry/adapters.py (claude_cli, agy_cli, gemini_api). Providers raise
 RateLimited only for limits; any other failure raises adapters.ProviderError, which this wrapper
 does not catch, so it never triggers the fallback.
+Tiers change only between tasks: call begin_task() at the start of each task and every call
+until the next begin_task() stays on that tier. A limit hit mid-task on the primary raises
+TierChanged (state saved, restart the task); on the fallback it raises Paused. Without
+begin_task() the wrapper switches per call.
 State lives in a small JSON file, so any process can resume after a restart.
 """
 
@@ -31,6 +35,11 @@ class RateLimited(Exception):
     def __init__(self, retry_after_seconds: Optional[float] = None):
         super().__init__("rate limited")
         self.retry_after_seconds = retry_after_seconds
+
+
+class TierChanged(Exception):
+    """Primary hit a limit in the middle of a task. The tier switch is saved and takes effect at
+    the next begin_task(), so the caller restarts the task."""
 
 
 class Paused(Exception):
@@ -73,13 +82,35 @@ class ModelWrapper:
         self.probe_interval = probe_interval_seconds
         self.default_cooldown = default_cooldown_seconds
         self.clock = clock
+        self._pinned: Optional[str] = None  # tier fixed by begin_task(), None outside a task
 
     # state
 
     def _load(self) -> dict:
+        state = {"tier": TIER_PRIMARY, "resume_at": 0.0, "last_probe": 0.0, "flash_commits": 0,
+                 "current_task": "", "paused_task": ""}
         if self.state_path.exists():
-            return json.loads(self.state_path.read_text())
-        return {"tier": TIER_PRIMARY, "resume_at": 0.0, "last_probe": 0.0, "flash_commits": 0}
+            state.update(json.loads(self.state_path.read_text()))
+        return state
+
+    def snapshot(self) -> dict:
+        return self._load()
+
+    def set_meta(self, **kv) -> None:
+        """Persist extra facts (for example paused_task) next to the tier state."""
+        state = self._load()
+        state.update(kv)
+        self._save(state)
+
+    def begin_task(self, task_id: str = "") -> None:
+        """Tier changes happen only here. Probe for a return to primary, then keep that tier
+        for every call until the next begin_task()."""
+        state = self._load()
+        if state["tier"] == TIER_FALLBACK:
+            self._maybe_return_to_primary(state, self.clock())
+        state["current_task"] = task_id
+        self._save(state)
+        self._pinned = state["tier"]
 
     def _save(self, state: dict) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,10 +131,11 @@ class ModelWrapper:
         state = self._load()
         now = self.clock()
 
-        if state["tier"] == TIER_FALLBACK:
+        pinned = self._pinned
+        if pinned is None and state["tier"] == TIER_FALLBACK:
             self._maybe_return_to_primary(state, now)
 
-        if state["tier"] == TIER_PRIMARY:
+        if (pinned or state["tier"]) == TIER_PRIMARY:
             try:
                 text = self.primary(prompt)
             except RateLimited as err:
@@ -111,6 +143,8 @@ class ModelWrapper:
                 state.update(tier=TIER_FALLBACK, resume_at=now + wait, last_probe=now)
                 self._save(state)
                 self._log({"event": "rate_limited", "tier": TIER_PRIMARY, "resume_at": state["resume_at"]})
+                if pinned:
+                    raise TierChanged(f"primary limited mid-task, resume_at={state['resume_at']}")
                 return self._call_fallback(prompt, bounded, state)
             self._save(state)
             self._log({"event": "call", "tier": TIER_PRIMARY, "model": self.primary_name})
