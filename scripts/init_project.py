@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = ROOT / "templates"
+IGNORE = ["logs/", ".venv/", "__pycache__/", ".env", "*.env", ".DS_Store"]
 FILES = ["constitution.md", "spec.md", "plan.md", "tasks.md", "project.yaml"]
 
 
@@ -36,6 +37,14 @@ def main() -> int:
             continue
         shutil.copyfile(TEMPLATES / name, target)
         copied.append(name)
+
+    gi = dest / ".gitignore"
+    have = gi.read_text().splitlines() if gi.exists() else []
+    add = [p for p in IGNORE if p not in have]
+    if add:
+        text = gi.read_text() if gi.exists() else ""
+        sep = "" if not text or text.endswith("\n") else "\n"
+        gi.write_text(text + sep + "\n".join(add) + "\n")
 
     print(f"Project: {dest}")
     print(f"  copied:  {', '.join(copied) or 'nothing'}")
