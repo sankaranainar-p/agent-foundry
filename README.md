@@ -38,7 +38,7 @@ Flash commits are labeled. Claude reviews them first after the switch back. No m
 python3 scripts/init_project.py /path/to/your/project
 ```
 
-This copies the templates into the project and writes a `project.yaml` you fill in (build, test, and run commands, whether it has a UI, allowed models). Then:
+This copies the templates into the project, creates or extends its `.gitignore` (`logs/`, `.venv/`, `__pycache__/`, `.env`, `*.env`, `.DS_Store`; existing lines are kept), and writes a `project.yaml` you fill in (build, test, and run commands, whether it has a UI, allowed models). Then:
 
 1. Run the design phase in Claude Code with EGM: `/egm:egm-brainstorm`, `/egm:egm-draft`, `/egm:egm-review`.
 2. Save the approved design as `spec.md` and `plan.md` in the project.
