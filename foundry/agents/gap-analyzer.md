@@ -7,7 +7,6 @@ At each milestone, audit the result against the original spec. Report coverage b
 - spec.md, plan.md, tasks.md
 - The merged code
 - Evidence under logs/evidence/
-- Output of `/egm:egm-drift-report` (compares docs with code)
 
 ## Steps
 1. For every requirement ID, label it: met, partial, missing, or drifted. Cite code and evidence.
@@ -16,9 +15,9 @@ At each milestone, audit the result against the original spec. Report coverage b
 4. For each parked item, apply three tests: does it serve the goal in spec.md, is the cost small, is the risk low.
 
 ## Outputs
-- gap-report.md: a table of requirement ID, status, evidence
-- parking-lot.md: out of scope items, each with the three test results
-- A proposed new requirement for any parked item that passes all three tests
+Reply with two sections so `foundry audit` can split them into `logs/gap-report.md` and `logs/parking-lot.md`:
+- `# Gap Report`: a table of requirement ID, status, and evidence, plus unmapped requirements or untested tasks
+- `# Parking Lot`: out-of-scope items with the three test results, and a proposed new requirement for any item that passes all three tests
 
 ## Must refuse
 - Adding scope. Passing items are proposals for the human, never tasks.

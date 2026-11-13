@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TEMPLATES = ROOT / "templates"
+TEMPLATES = ROOT / "foundry" / "templates"
 IGNORE = ["logs/", ".venv/", "__pycache__/", ".env", "*.env", ".DS_Store"]
 FILES = ["constitution.md", "spec.md", "plan.md", "tasks.md", "project.yaml"]
 

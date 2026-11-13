@@ -23,6 +23,32 @@ limits:
   review_retry_cap: 3           # developer and reviewer loops before escalating to the human
   probe_interval_minutes: 20    # how often to probe Claude when no exact reset time is known
   default_cooldown_minutes: 300 # assumed wait when a rate limit error has no retry time
+  agent_timeout_minutes: 30     # timeout for a tool-using developer run (mode: agent)
+
+# Optional agent settings. Put agents/<role>.md in your project to override any built-in role prompt.
+agents:
+  developer:
+    mode: diff                  # diff (default: model replies with a unified diff) | agent (Claude Code edits in a git worktree)
+    allowed_tools:
+      - Read
+      - Edit
+      - Write
+      - Glob
+      - Grep
+
+# Optional context settings for repo snapshots and document sources.
+context:
+  max_chars: 60000
+  include: []                   # fnmatch globs; empty means all tracked files
+  exclude:                      # fnmatch globs skipped from repo snapshots
+    - "*.lock"
+    - "uv.lock"
+    - "go.sum"
+    - "LICENSE*"
+  docs:                         # override where constitution, spec, and plan are read from
+    constitution: constitution.md
+    spec: spec.md
+    plan: plan.md
 
 # Regexes (case insensitive) matched against error output only. A match means rate limited.
 # Anything else that fails is a hard error and does not trigger the fallback.

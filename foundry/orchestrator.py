@@ -2,13 +2,15 @@
 
 Agents are callables supplied by you, so this loop is model and tool agnostic:
 
-    developer(task) -> str          returns a branch name or summary
-    reviewer(task, work) -> (bool, str)   approve flag and notes
-    tester(task, work) -> (bool, str)     pass flag and evidence path or notes
+    developer(task, notes) -> str          returns a branch name or summary
+    verifier(task, work) -> (bool, str)    optional: build and test commands
+    reviewer(task, work) -> (bool, str)    approve flag and notes
+    tester(task, work) -> (bool, str)      pass flag and evidence path or notes
+    merger(task, work) -> (bool, str)      optional: merge into the integration branch
 
 A failure at any stage routes back to the developer with the notes, up to review_retry_cap times.
-A task that exhausts its retries is marked blocked and the loop moves on, so one bad task
-does not stall the queue. The human sees blocked tasks in the status report.
+A task that exhausts its retries is marked blocked. The queue stops there (later tasks may depend
+on it) unless keep_going is set. The human sees blocked tasks in the status report.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .tasks import Task, next_open_task, parse_tasks, set_status
+from .tasks import Task, in_milestone, next_open_task, parse_tasks, set_status
 from .wrapper import Paused, TierChanged
 
 
@@ -54,10 +56,13 @@ def run_task(
     on_attempt: Optional[Callable[[Task, int], None]] = None,
     emit: Callable[[str], None] = lambda msg: None,
     record: Callable[[str, str], None] = lambda name, text: None,
+    verifier: Optional[Tester] = None,
 ) -> Outcome:
     """on_attempt(task, n) runs at the start of each attempt, emit(msg) reports progress, and
     record(name, text) saves a file for the current attempt (notes.txt holds the attempt's
-    end notes, so a blocked task's reason is its last attempt's notes.txt)."""
+    end notes, so a blocked task's reason is its last attempt's notes.txt).
+    verifier(task, work) runs the project's build and test commands before the review, so the
+    reviewer never spends a call on code that does not build or pass its tests."""
     notes = ""
     for attempt in range(1, retry_cap + 1):
         if on_attempt:
@@ -66,6 +71,13 @@ def run_task(
         try:
             work = developer(task, notes)
             emit(f"  developer ok ({work})")
+            if verifier:
+                stage = "verify"
+                passed, notes = verifier(task, work)
+                emit(f"  build/test: {'pass' if passed else 'fail'}")
+                if not passed:
+                    record("notes.txt", notes)
+                    continue
             stage = "reviewer"
             approved, notes = reviewer(task, work)
             if not approved:
@@ -112,24 +124,40 @@ def run_queue(
     on_attempt: Optional[Callable[[Task, int], None]] = None,
     emit: Callable[[str], None] = lambda msg: None,
     record: Callable[[str, str], None] = lambda name, text: None,
+    verifier: Optional[Tester] = None,
+    milestone: Optional[str] = None,
+    already_done: Optional[Callable[[Task], bool]] = None,
 ) -> list[Outcome]:
     """Work open tasks in order. Stops on a pause so the caller can sleep until resume_at, and
-    on a blocked task unless keep_going (later tasks may depend on it; they stay open).
+    on a blocked task unless keep_going (later tasks may depend on it; they stay open, and with
+    keep_going only tasks whose `Depends on` are all done still run).
 
     begin_task(task_id) runs before each task (wrapper.begin_task: the only place tiers change).
-    after_task(task, outcome) runs after each task, including a pause (status report)."""
+    after_task(task, outcome) runs after each task, including a pause (status report).
+    milestone limits the queue to tasks with that `Milestone:`.
+    already_done(task) is checked first: True means the work was merged by an earlier run that
+    crashed before writing the status, so the task is marked done without rerunning it."""
     path = Path(tasks_path)
     outcomes: list[Outcome] = []
     while True:
         text = path.read_text()
-        task = next_open_task(parse_tasks(text))
+        tasks = parse_tasks(text)
+        task = next_open_task(tasks, milestone)
         if task is None:
-            if not outcomes:
-                emit(f"no open tasks in {path}")
+            waiting = [t.id for t in tasks if t.status == "open" and in_milestone(t, milestone)]
+            if waiting:
+                emit(f"{len(waiting)} open task(s) wait on unfinished dependencies: {', '.join(waiting)}")
+            elif not outcomes:
+                emit(f"no open tasks in {path}" + (f" for milestone {milestone}" if milestone else ""))
             return outcomes
+        if already_done and already_done(task):
+            path.write_text(set_status(text, task.id, "done"))
+            emit(f"{task.id} already merged into the integration branch; marked done")
+            outcomes.append(Outcome(task.id, "done", 0, "already merged"))
+            continue
         if begin_task:
             begin_task(task.id)
-        outcome = run_task(task, developer, reviewer, tester, retry_cap, merger, on_attempt, emit, record)
+        outcome = run_task(task, developer, reviewer, tester, retry_cap, merger, on_attempt, emit, record, verifier)
         if outcome.status == "restart":
             emit(f"{task.id} tier changed ({outcome.notes}); restarting the task")
             continue  # tier switched; begin_task applies it on the rerun
@@ -190,6 +218,7 @@ def write_status(path: str | Path, tasks_text: str, state: dict, extra: tuple[st
         f"- current task: {state.get('current_task') or 'none'}",
         f"- active tier: {state.get('tier')}",
         f"- resume_at: {resume_s}",
+        *([f"- cost so far: ${state['cost_usd']:.2f} (as reported by the claude CLI)"] if state.get("cost_usd") else []),
         *[f"- {line}" for line in extra],
         "",
     ]

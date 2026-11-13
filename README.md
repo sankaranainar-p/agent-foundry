@@ -4,23 +4,24 @@
 
 A generic, spec-driven software factory for AI agents. A reviewed spec goes in. Verified code comes out.
 
-Design and analysis happen up front with [EGM](https://github.com/google/elephant-goldfish-model) (elephant and goldfish) and, optionally, GitHub Spec Kit. Then a pipeline of agents builds, reviews, tests, and audits the work, and survives rate limits without losing state.
+Design and analysis happen up front with [EGM](https://github.com/google/elephant-goldfish-model) (elephant and goldfish) and, optionally, GitHub Spec Kit. Then a pipeline of agents builds, verifies, reviews, tests, and audits the work inside isolated git worktrees, and survives rate limits without losing state.
 
 ## Pipeline
 
 ```
 design phase (you + EGM)          execution phase (agent-foundry)
-brainstorm > draft > review  ->   Planner > Developer > PR Reviewer > Playwright > Gap Analyzer
+brainstorm > draft > review  ->   Planner > Developer > Verify (build/test) > PR Reviewer > Smoke/Playwright > Gap Analyzer
 spec.md, plan.md approved         tasks.md approved, then loop until milestone is clean
 ```
 
-| Agent | Job | Role file |
+| Stage | Job | Role file (override in `<project>/agents/`) |
 | --- | --- | --- |
-| 0. Planner | Reviews the spec, splits it into ordered tasks with requirement IDs and done-checks | `agents/planner.md` |
-| 1. Developer | Implements one task on a branch, commits small | `agents/developer.md` |
-| 2. PR Reviewer | Reviews the diff in a fresh context | `agents/reviewer.md` |
-| 3. Playwright Tester | Runs browser flows (or a smoke test if no UI) and saves evidence | `agents/playwright.md` |
-| 4. Gap Analyzer | Audits the milestone against the spec by requirement ID | `agents/gap-analyzer.md` |
+| 0. Planner | Reviews the spec, splits it into ordered tasks with requirement IDs, dependencies, milestones, and done-checks | `foundry/agents/planner.md` |
+| 1. Developer | Implements one task in an isolated git worktree (`mode: agent` edits files with tools; `mode: diff` applies a unified diff) | `foundry/agents/developer.md` |
+| 1b. Verify | Deterministic gate: runs `commands.build` and `commands.test` in the worktree before calling the reviewer | `foundry/runners.py` |
+| 2. PR Reviewer | Reviews the diff + full touched files in a fresh context | `foundry/agents/reviewer.md` |
+| 3. Playwright / Smoke | Runs `commands.smoke` (or browser flows when `has_ui: true`) and saves evidence | `foundry/agents/playwright.md` |
+| 4. Gap Analyzer | Audits the milestone against the spec by requirement ID (`logs/gap-report.md` and `logs/parking-lot.md`) | `foundry/agents/gap-analyzer.md` |
 
 ## Model tiers
 
@@ -30,7 +31,7 @@ The wrapper in `foundry/wrapper.py` sends every call through three tiers:
 2. Gemini Flash, only for bounded tasks (tests, docs, small fixes), only after Claude hits a limit.
 3. Pause: state is saved, the orchestrator sleeps until `resume_at`, then probes Claude and resumes.
 
-Flash commits are labeled. Claude reviews them first after the switch back. No model grades its own work.
+Flash commits are labeled `[flash]`. Claude reviews them first after the switch back. No model grades its own work.
 
 ## Use it on a project
 
@@ -38,44 +39,41 @@ Flash commits are labeled. Claude reviews them first after the switch back. No m
 python3 scripts/init_project.py /path/to/your/project
 ```
 
-This copies the templates into the project, creates or extends its `.gitignore` (`logs/`, `.venv/`, `__pycache__/`, `.env`, `*.env`, `.DS_Store`; existing lines are kept), and writes a `project.yaml` you fill in (build, test, and run commands, whether it has a UI, allowed models). Then:
+This copies the templates into the project, creates or extends its `.gitignore` (`logs/`, `.venv/`, `__pycache__/`, `.env`, `*.env`, `.DS_Store`; existing lines are kept), and writes a `project.yaml` you fill in (build, test, run, and smoke commands, `agents.developer.mode`, `context`, `protected_paths`, and allowed models). Then:
 
 1. Run the design phase in Claude Code with EGM: `/egm:egm-brainstorm`, `/egm:egm-draft`, `/egm:egm-review`.
-2. Save the approved design as `spec.md` and `plan.md` in the project.
-3. Run the Planner to produce `tasks.md`. Approve it.
-4. Run the orchestrator.
+2. Save the approved design as `spec.md` and `plan.md` in the project (or point `context.docs` in `project.yaml` at your existing design docs such as `docs/design.md` and `CLAUDE.md`).
+3. Run the Planner to produce `tasks.proposed.md`, review it, and move it over `tasks.md`.
+4. Run the orchestrator, then run the Gap Analyzer at the milestone boundary.
 
 ## Layout
 
 ```
-agents/       role files, one per agent
-templates/    constitution, spec, plan, tasks, project.yaml
-foundry/      wrapper (tiers, probe, logging), adapters, runners, cli, tasks parser, orchestrator loop
+foundry/
+  agents/     built-in role files (planner, developer, reviewer, playwright, gap-analyzer)
+  templates/  constitution, spec, plan, tasks, project.yaml
+  wrapper.py, adapters.py, runners.py, cli.py, tasks.py, orchestrator.py
 scripts/      init_project.py, smoke_adapters.py
-tests/        wrapper and parser tests, including a fake 429 test
+tests/        unit and integration tests
 examples/     worked example (spanslo)
 ```
 
-## Status
-
-Runnable, not yet proven on a real project. Implemented and tested with fake providers: the wrapper, task parser, orchestrator loop, real adapters (`foundry/adapters.py`: `claude_cli`, `agy_cli`, `gemini_api`, picked by `models.fallback_provider`), and one runner per agent (`foundry/runners.py`).
+## CLI & Behavior
 
 ```bash
-python -m foundry plan <project_dir>            # writes tasks.proposed.md; you approve by moving it over tasks.md
-python -m foundry run <project_dir> [--no-wait] # works the queue; sleeps through rate limits unless --no-wait
+python -m foundry plan <project_dir>                              # writes tasks.proposed.md and validates it
+python -m foundry run <project_dir> [--milestone M] [--no-wait]   # works the queue; sleeps through rate limits unless --no-wait
+python -m foundry audit <project_dir>                             # runs the Gap Analyzer -> logs/gap-report.md (+ logs/parking-lot.md)
 ```
 
-- Tiers change only between tasks. A limit hit mid-task restarts the task on the new tier; a fallback task never returns to Claude until the next task.
-- The developer asks the model for a unified diff and applies it with `git apply`. Every task branch starts from the tip of `foundry/integration` (created from your current branch on the first run). The developer prompt snapshot and the reviewer diff both come from that tip.
-- After review and the smoke test pass, the orchestrator merges the task branch into `foundry/integration` with `--no-ff`, then marks the task done. A merge conflict blocks the task and records the conflict text. Nothing is ever merged into your base branch or main: you review `foundry/integration` and merge it yourself.
-- Diffs that touch `protected_paths` (default: constitution, spec, plan, tasks, project.yaml, `agents/`, `.github/`, `.env*`) are rejected before any branch is created, and the paths go back to the developer as notes. Flash commits end with `[flash]`.
-- A blocked task stops the queue (later tasks may depend on it) and `run` exits 1; pass `--keep-going` to continue past it. Exit codes: 0 all done, 1 blocked, 2 paused with `--no-wait`.
-- Progress goes to stderr (integration branch, each task start with tier and attempt, each stage result, done/blocked/paused with reasons and `resume_at`, a final summary). `--quiet` turns it off.
-- Every attempt is saved under `logs/<task-id>/attempt-<n>/`: `developer-reply.md`, `diff.patch`, `reviewer-reply.md`, `smoke.txt`, `failure.txt` (when an agent failed) and `notes.txt` (how the attempt ended). A blocked task's reason is the last attempt's `notes.txt`.
-- The reviewer's first line must be `VERDICT: APPROVE` or `VERDICT: CHANGES REQUESTED`. Markdown emphasis and punctuation are ignored, but anything ambiguous counts as not approved (the raw reply is kept in the attempt log).
-- A pause keeps the task open. State is in `logs/state.json`; `logs/status.md` is rewritten after every task.
-- Playwright: only `has_ui: false` works (runs `commands.smoke`, saves output under `logs/evidence/<task-id>/`). `has_ui: true` raises `NotImplementedError`.
-- Not done: a crash between the merge and the status write leaves a merged task open (its rerun then fails to apply and blocks); the developer does not run `commands.test` itself, the gap analyzer has no CLI command, and `python scripts/smoke_adapters.py` makes one real call per tier.
+- **Isolated git worktrees:** All branch creation, patch application, tool-assisted edits, `build`/`test` verification, smoke runs, and merges into `foundry/integration` happen inside temporary git worktrees. Your working tree and checked-out branch are never touched.
+- **Developer modes:** Set `agents.developer.mode: agent` in `project.yaml` to run Claude Code (`claude -p --permission-mode acceptEdits --allowedTools ...`) directly inside the task worktree, or `mode: diff` (default) for text-in/unified-diff-out. When the wrapper is on the fallback tier, it automatically uses `diff` mode.
+- **Deterministic build & test gate:** When `commands.build` or `commands.test` is set in `project.yaml`, `Runners.verify` runs them in the task worktree before the reviewer is called. Any failure routes the command output back to the developer as retry notes and saves `verify.txt` in the attempt folder.
+- **Configurable context & docs:** `context.include`, `context.exclude`, and `context.max_chars` filter repository snapshots (lockfiles, binaries, and licenses are excluded by default). `context.docs.{constitution,spec,plan}` can point to existing project files (such as `CLAUDE.md` and `docs/design.md`), and `<project>/agents/<role>.md` overrides any built-in role prompt.
+- **Task validation, dependencies & milestones:** Before `run` starts, `validate_tasks` checks that every task has `Satisfies:` requirement IDs (verified against the spec when the spec defines `R-...` IDs), `Done when:`, `Status:`, and valid `Depends on:` references. Tasks can declare `Depends on: T-001` and `Milestone: W5` (`--milestone W5` filters the queue).
+- **Idempotent crash recovery:** If a previous run merged a task branch into `foundry/integration` and crashed before updating `tasks.md`, the next run detects the ancestor commit on `foundry/integration` and marks the task `done` instead of re-applying and blocking.
+- **Observability:** Every model call logs `role`, `duration_s`, `prompt_chars`, `reply_chars`, and (when reported by `claude`) `cost_usd`, `input_tokens`, `output_tokens`, and `num_turns` to `logs/calls.jsonl`, and accumulates `cost_usd` in `logs/state.json` and `logs/status.md`.
+- **Remaining limitation:** `has_ui: true` (Playwright browser flows) still raises `NotImplementedError`; `has_ui: false` runs `commands.smoke` and records `stdout.txt`, `stderr.txt`, and `exit_code.txt` under `logs/evidence/<task-id>/`.
 
 ## Rules
 

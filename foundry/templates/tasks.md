@@ -8,4 +8,6 @@ Inputs: what the developer reads
 Outputs: what the developer produces
 Done when: one observable, testable condition
 Allowed models: Claude
+Depends on: none
+Milestone: M1
 Status: open

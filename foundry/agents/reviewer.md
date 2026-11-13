@@ -4,7 +4,7 @@
 Review one branch against the task, the spec, and the constitution. Fresh context every time.
 
 ## Inputs
-- The diff of the branch
+- The diff of the branch and the full contents of the touched files
 - The task entry from tasks.md
 - constitution.md and spec.md
 - Never the developer's chat or reasoning

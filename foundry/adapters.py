@@ -74,8 +74,20 @@ def _run(run: Callable, cmd: list[str], timeout: float, cwd: str | None = None):
 # claude
 
 
-def claude_cli(prompt: str, patterns: Iterable[str] = (), timeout: float = 600, run: Callable = subprocess.run) -> str:
-    proc = _run(run, ["claude", "-p", prompt, "--output-format", "json"], timeout)
+class Reply(str):
+    """A str that also carries usage facts (cost, tokens) for the call log."""
+
+    meta: dict
+
+    def __new__(cls, text: str, **meta):
+        obj = super().__new__(cls, text)
+        obj.meta = meta
+        return obj
+
+
+def claude_cli(prompt: str, patterns: Iterable[str] = (), timeout: float = 600, run: Callable = subprocess.run,
+               extra_args: Iterable[str] = (), cwd: str | None = None) -> str:
+    proc = _run(run, ["claude", "-p", prompt, "--output-format", "json", *extra_args], timeout, cwd=cwd)
     try:
         data = json.loads(proc.stdout)
     except (json.JSONDecodeError, TypeError):
@@ -88,7 +100,20 @@ def claude_cli(prompt: str, patterns: Iterable[str] = (), timeout: float = 600, 
         if data.get("api_error_status") == 429 or _matches(result, patterns):
             raise RateLimited(parse_retry_after(result))
         raise ProviderError(f"claude error (status {data.get('api_error_status')}): {result[:200]}")
-    return result
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return Reply(result, cost_usd=data.get("total_cost_usd"), input_tokens=usage.get("input_tokens"),
+                 output_tokens=usage.get("output_tokens"), num_turns=data.get("num_turns"))
+
+
+AGENT_TOOLS_DEFAULT = ("Read", "Edit", "Write", "Glob", "Grep")
+
+
+def claude_agent(prompt: str, cwd: str, patterns: Iterable[str] = (), tools: Iterable[str] = AGENT_TOOLS_DEFAULT,
+                 timeout: float = 1800, run: Callable = subprocess.run) -> str:
+    """Claude Code as a tool-using agent inside cwd (a throwaway git worktree). Edits are accepted
+    without prompts; only the listed tools are allowed. The orchestrator commits the result."""
+    args = ["--permission-mode", "acceptEdits", "--allowedTools", ",".join(tools)]
+    return claude_cli(prompt, patterns, timeout, run, extra_args=args, cwd=cwd)
 
 
 # agy (Gemini CLI fallback)
@@ -156,6 +181,15 @@ def gemini_api(prompt: str, model: str, timeout: float = 120, urlopen: Callable 
 
 def load_config(path: str | Path) -> dict:
     return yaml.safe_load(Path(path).read_text()) or {}
+
+
+def build_agent(cfg: dict) -> Callable[[str, str], str]:
+    """(prompt, cwd) -> str for agents.developer.mode: agent. Primary tier only."""
+    dev = ((cfg.get("agents") or {}).get("developer") or {})
+    tools = dev.get("allowed_tools") or AGENT_TOOLS_DEFAULT
+    timeout = (cfg.get("limits") or {}).get("agent_timeout_minutes", 30) * 60
+    pats = (cfg.get("rate_limit_patterns") or {}).get("claude", [])
+    return lambda prompt, cwd: claude_agent(prompt, cwd, pats, tools, timeout)
 
 
 def build_providers(cfg: dict) -> tuple[Provider, Provider, str]:

@@ -20,7 +20,7 @@ def limited(_prompt):
     raise RateLimited(3600)
 
 
-cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "templates/project.yaml")
+cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "foundry/templates/project.yaml")
 primary, fallback, name = build_providers(cfg)
 
 with tempfile.TemporaryDirectory() as tmp:

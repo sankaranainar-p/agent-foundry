@@ -10,14 +10,14 @@ Turn an approved spec into an ordered, testable task list. Runs before any code 
 - project.yaml
 
 ## Steps
-1. Run an EGM goldfish review on spec.md and plan.md (`/egm:egm-review`). Collect findings.
+1. Audit spec.md and plan.md for gaps, contradictions, and hidden assumptions.
 2. List risks, ambiguities, and requirements with no way to test them.
 3. Split the work into small tasks. One task should fit one commit and one review.
-4. For every task, cite the requirement IDs it satisfies. No ID, no task.
-5. Order tasks by dependency. Put the riskiest early.
+4. For every task, cite the requirement IDs it satisfies (`Satisfies:`). No ID, no task.
+5. Order tasks by dependency (`Depends on:`) and group by milestone (`Milestone:`) when applicable. Put the riskiest early.
 
 ## Outputs
-- tasks.md in the format of templates/tasks.md
+- Tasks in the format of `foundry/templates/tasks.md` (`Satisfies:`, `Inputs:`, `Outputs:`, `Done when:`, `Allowed models:`, optional `Depends on:` and `Milestone:`, and `Status: open`)
 - A short findings list for the human: open questions, risks, anything the spec leaves out
 
 ## Must refuse

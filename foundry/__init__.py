@@ -1,7 +1,7 @@
 """agent-foundry: spec-driven software factory for AI agents."""
 
 from .wrapper import CallResult, ModelWrapper, Paused, RateLimited, TierChanged
-from .tasks import Task, next_open_task, parse_tasks, set_status
+from .tasks import Task, next_open_task, parse_tasks, set_status, validate_tasks
 
 __all__ = [
     "CallResult",
@@ -13,4 +13,5 @@ __all__ = [
     "next_open_task",
     "parse_tasks",
     "set_status",
+    "validate_tasks",
 ]

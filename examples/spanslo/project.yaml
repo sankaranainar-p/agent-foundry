@@ -1,19 +1,19 @@
-# Worked example: spanslo, the pilot project.
-# Copy this into the spanslo repo and fill in the TODOs after the design phase.
+# Worked example: spanslo, the pilot project (Go scorer + Python benchmark).
+# Copy this into the spanslo repo as `project.yaml`.
 name: spanslo
 
 commands:
-  build: ""   # TODO
-  test: ""    # TODO
-  run: ""     # TODO
-  smoke: ""         # used when has_ui is false: exits 0 on pass, for example: python -m myapp --selftest
+  build: "go build ./..."
+  test: "go vet ./... && go test ./... && (cd bench && uv run ruff check && uv run pytest)"
+  run: "go run ./cmd/spanslo"
+  smoke: "go run ./cmd/spanslo"
 
-has_ui: false   # TODO: set true if spanslo gets a web dashboard. This decides if Playwright applies.
+has_ui: false
 base_url: ""
 
 models:
   primary: claude
-  fallback: gemini-3.8-flash    # model name is config, swap it any time. agy and the REST API both accept it
+  fallback: gemini-3.8-flash
   fallback_provider: agy        # agy | gemini-api (gemini-api needs GEMINI_API_KEY in the environment)
   fallback_allowed_for:
     - tests
@@ -24,9 +24,51 @@ limits:
   review_retry_cap: 3
   probe_interval_minutes: 20
   default_cooldown_minutes: 300
+  agent_timeout_minutes: 30
+
+agents:
+  developer:
+    mode: agent                 # agent (edits in a git worktree) | diff (unified diff from snapshot)
+    allowed_tools:
+      - Read
+      - Edit
+      - Write
+      - Glob
+      - Grep
+
+context:
+  max_chars: 120000
+  include:
+    - "core/*"
+    - "cmd/*"
+    - "collector/*"
+    - "spec/*.yaml"
+    - "spec/*.json"
+    - "spec/*.md"
+    - "catalog/*"
+    - "bench/pyproject.toml"
+    - "bench/tests/*"
+    - "go.mod"
+  exclude:
+    - "*.lock"
+    - "uv.lock"
+    - "go.sum"
+    - "spec/examples/*"
+    - "docs/plan-private.md"
+    - "LICENSE*"
+  docs:
+    constitution:
+      - CLAUDE.md
+      - constitution.md
+    spec:
+      - spec.md
+      - docs/design.md
+      - spec/sli-definitions.md
+    plan:
+      - plan.md
+      - docs/design.md
 
 # Regexes (case insensitive) matched against error output only. A match means rate limited.
-# Anything else that fails is a hard error and does not trigger the fallback.
 rate_limit_patterns:
   claude:
     - "hit your limit"
@@ -39,14 +81,25 @@ rate_limit_patterns:
     - "rate limit"
     - "\\b429\\b"
 
-# Developer diffs that touch these paths are rejected. fnmatch patterns, case insensitive,
-# matched against the full path and the file name. Setting this replaces the defaults.
+# Frozen at gate G1 + dependency and hook guardrails from CLAUDE.md.
 protected_paths:
   - constitution.md
+  - CLAUDE.md
   - spec.md
   - plan.md
   - tasks.md
   - project.yaml
+  - "spec/*"
+  - "catalog/*"
+  - "docs/design.md"
+  - "docs/plan-private.md"
+  - "docs/adr/*"
+  - "docs/g0/*"
+  - "go.mod"
+  - "go.sum"
+  - "bench/pyproject.toml"
+  - "bench/uv.lock"
+  - ".githooks/*"
   - "agents/*"
   - ".github/*"
   - ".env*"

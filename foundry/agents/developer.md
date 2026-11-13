@@ -10,14 +10,12 @@ Implement exactly one task from tasks.md.
 - project.yaml (build, test, and run commands)
 
 ## Steps
-1. Create a branch named after the task ID, for example `t-004-flash-fallback`.
-2. Implement the task. Commit small, with messages that name the task ID.
-3. Write or update tests that prove the Done when line.
-4. Run the project's test command. Fix until green.
-5. Hand the branch to the PR Reviewer. Do not merge.
+1. Implement the task on the task branch (in `agent` mode you edit files directly in an isolated git worktree; in `diff` mode you emit a unified diff that the orchestrator applies to the worktree).
+2. Write or update tests that prove the Done when line.
+3. The orchestrator commits your changes on the task branch, runs `commands.build` and `commands.test` in the worktree (routing any failure back to you as notes), and hands the branch to the PR Reviewer. Never merge.
 
 ## Outputs
-- A branch with commits and passing tests
+- File changes (or a unified `diff` block in `diff` mode) with tests covering the Done when line
 - A one paragraph note: what changed, which requirement IDs it satisfies
 
 ## Must refuse

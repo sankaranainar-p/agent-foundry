@@ -132,8 +132,16 @@ class ModelWrapper:
 
     # calls
 
-    def call(self, prompt: str, bounded: bool = False) -> CallResult:
-        """Call a model. bounded=True means the task is allowed to run on the fallback model."""
+    @property
+    def active_tier(self) -> str:
+        """The tier the next call will try first: the pinned tier inside a task, else the saved one."""
+        return self._pinned or self._load()["tier"]
+
+    def call(self, prompt: str, bounded: bool = False, primary: Optional[Provider] = None,
+             role: str = "") -> CallResult:
+        """Call a model. bounded=True means the task is allowed to run on the fallback model.
+        primary overrides the primary provider for this call only (for example a tool-using agent
+        run in a worktree); rate limits and tiers behave exactly as for the default primary."""
         state = self._load()
         now = self.clock()
 
@@ -142,8 +150,9 @@ class ModelWrapper:
             self._maybe_return_to_primary(state, now)
 
         if (pinned or state["tier"]) == TIER_PRIMARY:
+            started = time.monotonic()
             try:
-                text = self.primary(prompt)
+                text = (primary or self.primary)(prompt)
             except RateLimited as err:
                 wait = err.retry_after_seconds or self.default_cooldown
                 state.update(tier=TIER_FALLBACK, resume_at=now + wait, last_probe=now)
@@ -151,12 +160,24 @@ class ModelWrapper:
                 self._log({"event": "rate_limited", "tier": TIER_PRIMARY, "resume_at": state["resume_at"]})
                 if pinned:
                     raise TierChanged(state["resume_at"], "primary rate limited mid-task")
-                return self._call_fallback(prompt, bounded, state)
+                return self._call_fallback(prompt, bounded, state, role)
+            self._log(self._usage(state, text, prompt, started, role, TIER_PRIMARY, self.primary_name))
             self._save(state)
-            self._log({"event": "call", "tier": TIER_PRIMARY, "model": self.primary_name})
-            return CallResult(text, TIER_PRIMARY, self.primary_name, "")
+            return CallResult(str(text), TIER_PRIMARY, self.primary_name, "")
 
-        return self._call_fallback(prompt, bounded, state)
+        return self._call_fallback(prompt, bounded, state, role)
+
+    def _usage(self, state: dict, text: str, prompt: str, started: float, role: str, tier: str, model: str) -> dict:
+        """One call event: role, sizes, duration, and cost and tokens when the adapter reports them
+        (claude_cli returns a Reply with .meta). Cost also accumulates in state["cost_usd"]."""
+        meta = getattr(text, "meta", None) or {}
+        if meta.get("cost_usd"):
+            state["cost_usd"] = round(state.get("cost_usd", 0.0) + float(meta["cost_usd"]), 6)
+        event = {"event": "call", "tier": tier, "model": model, "role": role,
+                 "duration_s": round(time.monotonic() - started, 3),
+                 "prompt_chars": len(prompt), "reply_chars": len(text)}
+        event.update({k: v for k, v in meta.items() if v is not None})
+        return event
 
     def _maybe_return_to_primary(self, state: dict, now: float) -> None:
         """Switch back only after resume_at, and only with a successful probe."""
@@ -177,11 +198,12 @@ class ModelWrapper:
         self._save(state)
         self._log({"event": "returned_to_primary"})
 
-    def _call_fallback(self, prompt: str, bounded: bool, state: dict) -> CallResult:
+    def _call_fallback(self, prompt: str, bounded: bool, state: dict, role: str = "") -> CallResult:
         if not bounded:
             # Unbounded work waits for the primary model. It never runs on the fallback.
             self._log({"event": "paused", "reason": "unbounded task, primary limited"})
             raise Paused(state["resume_at"], "unbounded task, primary limited")
+        started = time.monotonic()
         try:
             text = self.fallback(prompt)
         except RateLimited as err:
@@ -191,6 +213,6 @@ class ModelWrapper:
             self._log({"event": "paused", "reason": "fallback limited", "resume_at": state["resume_at"]})
             raise Paused(state["resume_at"], "fallback limited")
         state["flash_commits"] = state.get("flash_commits", 0) + 1
+        self._log(self._usage(state, text, prompt, started, role, TIER_FALLBACK, self.fallback_name))
         self._save(state)
-        self._log({"event": "call", "tier": TIER_FALLBACK, "model": self.fallback_name})
-        return CallResult(text, TIER_FALLBACK, self.fallback_name, self.fallback_label)
+        return CallResult(str(text), TIER_FALLBACK, self.fallback_name, self.fallback_label)
