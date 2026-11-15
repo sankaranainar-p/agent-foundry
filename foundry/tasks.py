@@ -10,6 +10,7 @@ Format, one block per task:
     Allowed models: Claude, Gemini Flash
     Depends on: T-002, T-003      (optional; earlier tasks only)
     Milestone: M1                 (optional; `foundry run --milestone M1` works only these)
+    Verify: go test ./core/...    (optional; no shell, first word must be in verify_allowlist)
     Status: open
 
 The orchestrator only ever changes the Status line.
@@ -54,6 +55,11 @@ class Task:
     def depends_on(self) -> list[str]:
         raw = self.fields.get("Depends on", "")
         return [d.strip() for d in re.split(r"[,\s]+", raw) if d.strip() and d.strip().lower() != "none"]
+
+    @property
+    def verify(self) -> str:
+        """Optional `Verify:` command, run without a shell on every attempt."""
+        return self.fields.get("Verify", "").strip()
 
     @property
     def milestone(self) -> str:

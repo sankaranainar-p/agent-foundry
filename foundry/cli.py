@@ -105,6 +105,7 @@ def main(argv=None, providers=None, agent_runner=None) -> int:
         begin_task=wrapper.begin_task, after_task=after, merger=runners.merge,
         keep_going=args.keep_going, on_attempt=on_attempt, emit=emit, record=runners.record,
         verifier=runners.verify, milestone=args.milestone or None, already_done=runners.is_merged,
+        precheck=runners.verify_problem,
     )
     outcomes = run_until_done(run_once, lambda: wrapper.snapshot()["resume_at"], wrapper.probe_interval,
                               wait=not args.no_wait)

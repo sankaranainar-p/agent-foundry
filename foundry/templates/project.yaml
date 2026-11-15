@@ -24,6 +24,9 @@ limits:
   probe_interval_minutes: 20    # how often to probe Claude when no exact reset time is known
   default_cooldown_minutes: 300 # assumed wait when a rate limit error has no retry time
   agent_timeout_minutes: 30     # timeout for a tool-using developer run (mode: agent)
+  command_timeout_seconds: 300  # per verify, test, smoke command; the whole process group is killed on timeout
+
+verify_allowlist: [go, uv, pytest, npm, make]   # first word of a task's `Verify:` line must be one of these
 
 # Optional agent settings. Put agents/<role>.md in your project to override any built-in role prompt.
 agents:
@@ -65,7 +68,8 @@ rate_limit_patterns:
     - "\\b429\\b"
 
 # Developer diffs that touch these paths are rejected. fnmatch patterns, case insensitive,
-# matched against the full path and the file name. Setting this replaces the defaults.
+# matched against the normalized full path and the file name. These ADD to the built-in defaults
+# (constitution.md, spec.md, plan.md, tasks.md, project.yaml, agents/, .github/, .env*); they never replace them.
 protected_paths:
   - constitution.md
   - spec.md

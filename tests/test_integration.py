@@ -92,7 +92,8 @@ def test_protected_paths_come_from_project_yaml(proj):
     with pytest.raises(AgentFailed, match="hello.txt"):
         r.developer(task(proj))
     r2, _ = runners(proj, lambda p: new_file("agents/x.md"), cfg=cfg)
-    r2.developer(task(proj))  # defaults replaced, agents/ no longer listed
+    with pytest.raises(AgentFailed, match="agents/x.md"):  # config adds to the defaults, never replaces
+        r2.developer(task(proj))
 
 
 def test_retry_after_rejected_review_starts_fresh_branch_and_merges_once(proj):

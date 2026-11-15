@@ -57,12 +57,20 @@ def run_task(
     emit: Callable[[str], None] = lambda msg: None,
     record: Callable[[str, str], None] = lambda name, text: None,
     verifier: Optional[Tester] = None,
+    precheck: Optional[Callable[[Task], str]] = None,
 ) -> Outcome:
     """on_attempt(task, n) runs at the start of each attempt, emit(msg) reports progress, and
     record(name, text) saves a file for the current attempt (notes.txt holds the attempt's
     end notes, so a blocked task's reason is its last attempt's notes.txt).
     verifier(task, work) runs the project's build and test commands before the review, so the
     reviewer never spends a call on code that does not build or pass its tests."""
+    if precheck and (problem := precheck(task)):  # config error: no developer call can fix it
+        if on_attempt:
+            on_attempt(task, 1)  # sets the log dir for record()
+        problem = f"config: {problem}"
+        emit(f"  {problem}")
+        record("notes.txt", problem)
+        return Outcome(task.id, "blocked", 0, problem)
     notes = ""
     for attempt in range(1, retry_cap + 1):
         if on_attempt:
@@ -127,6 +135,7 @@ def run_queue(
     verifier: Optional[Tester] = None,
     milestone: Optional[str] = None,
     already_done: Optional[Callable[[Task], bool]] = None,
+    precheck: Optional[Callable[[Task], str]] = None,
 ) -> list[Outcome]:
     """Work open tasks in order. Stops on a pause so the caller can sleep until resume_at, and
     on a blocked task unless keep_going (later tasks may depend on it; they stay open, and with
@@ -157,7 +166,7 @@ def run_queue(
             continue
         if begin_task:
             begin_task(task.id)
-        outcome = run_task(task, developer, reviewer, tester, retry_cap, merger, on_attempt, emit, record, verifier)
+        outcome = run_task(task, developer, reviewer, tester, retry_cap, merger, on_attempt, emit, record, verifier, precheck)
         if outcome.status == "restart":
             emit(f"{task.id} tier changed ({outcome.notes}); restarting the task")
             continue  # tier switched; begin_task applies it on the rerun

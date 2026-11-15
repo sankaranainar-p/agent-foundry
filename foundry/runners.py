@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
+import os
 import posixpath
 import re
+import shlex
 import shutil
+import signal
 import string
 import subprocess
 import tempfile
@@ -28,6 +31,11 @@ from .wrapper import TIER_PRIMARY, ModelWrapper
 AGENTS = Path(__file__).resolve().parent / "agents"
 SNAPSHOT_CHARS = 60_000
 INTEGRATION = "foundry/integration"
+REJECTED_HEADING = "Rejected attempt: do not reapply as is; fix the cause"
+REJECTED_DIFF_CHARS = 20 * 1024
+COMMAND_TIMEOUT_DEFAULT = 300
+SHELL_OPERATORS = {";", "&", "&&", "|", "||", ">", ">>", "<"}
+VERIFY_ALLOWLIST_DEFAULT = ["go", "uv", "pytest", "npm", "make"]
 PROTECTED_DEFAULT = [
     "constitution.md", "spec.md", "plan.md", "tasks.md", "project.yaml", "agents/*", ".github/*", ".env*",
 ]
@@ -66,8 +74,13 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:30].strip("-")
 
 
+def _norm(raw: str) -> str:
+    """posix separators, `..` and `.` resolved, no leading `./` or `/`."""
+    return posixpath.normpath(raw.replace("\\", "/").strip()).lstrip("/")
+
+
 def _match_any(raw: str, patterns: Iterable[str]) -> bool:
-    path = posixpath.normpath(raw).casefold()
+    path = _norm(raw).casefold()
     base = posixpath.basename(path)
     for p in patterns:
         pat = p.casefold()
@@ -89,6 +102,7 @@ class Runners:
         self.cfg = cfg
         self.agent_runner = agent_runner
         self._attempt_dir: Optional[Path] = None
+        self._prev_dir: Optional[Path] = None
         self.integ = INTEGRATION
         self.base = _git(self.dir, "rev-parse", "--abbrev-ref", "HEAD").strip() if (self.dir / ".git").exists() else ""
 
@@ -96,6 +110,7 @@ class Runners:
 
     def set_attempt(self, task_id: str, n: int) -> None:
         self._attempt_dir = self.dir / "logs" / task_id / f"attempt-{n}"
+        self._prev_dir = self.dir / "logs" / task_id / f"attempt-{n - 1}" if n > 1 else None
         shutil.rmtree(self._attempt_dir, ignore_errors=True)  # a rerun must not leave stale files
         self._attempt_dir.mkdir(parents=True)
 
@@ -141,6 +156,22 @@ class Runners:
         parts = [self._role_text(role)]
         parts += [f"\n=== {k.replace('_', ' ')} ===\n{v}" for k, v in sections.items() if v]
         return "\n".join(parts)
+
+    def _rejected_attempt(self) -> dict[str, str]:
+        """On attempt > 1: the previous attempt's diff (capped) and failing output tail, as a prompt section.
+        The worktree still starts clean from integration; this only tells the developer what failed."""
+        if not self._prev_dir:
+            return {}
+        diff = self._prev_dir / "diff.patch"
+        notes = self._prev_dir / "notes.txt"
+        parts = []
+        if diff.exists() and (text := diff.read_text()):
+            if len(text) > REJECTED_DIFF_CHARS:
+                text = text[:REJECTED_DIFF_CHARS] + f"\n[diff truncated at {REJECTED_DIFF_CHARS // 1024} KB]\n"
+            parts.append(f"--- diff.patch\n{text}")
+        if notes.exists() and (text := "\n".join(notes.read_text().splitlines()[-200:])):
+            parts.append(f"--- failing output (last 200 lines)\n{text}")
+        return {REJECTED_HEADING: "\n".join(parts)} if parts else {}
 
     def _task_text(self, task: Task) -> str:
         return f"{task.id}: {task.title}\n" + "\n".join(f"{k}: {v}" for k, v in task.fields.items())
@@ -222,7 +253,9 @@ class Runners:
         return rc == 0
 
     def _protected_patterns(self) -> list[str]:
-        return [p.casefold() for p in self.cfg.get("protected_paths") or PROTECTED_DEFAULT]
+        """PROTECTED_DEFAULT plus cfg protected_paths. The config can only add, never replace."""
+        extra = [str(p) for p in self.cfg.get("protected_paths") or []]
+        return [(_norm(p) + "/*" if p.endswith("/") else _norm(p)).casefold() for p in PROTECTED_DEFAULT + extra]
 
     def _filter_protected(self, paths: Iterable[str]) -> list[str]:
         pats = self._protected_patterns()
@@ -274,6 +307,7 @@ class Runners:
             "developer",
             constitution=self.doc_text("constitution"), spec=self.doc_text("spec"), plan=self.doc_text("plan"),
             task=self._task_text(task), notes_from_previous_attempt=notes, repository=self._snapshot(),
+            **self._rejected_attempt(),
             output_format="Reply with ONE unified diff in a ```diff fenced block (paths relative to the repo root, "
                           "git apply compatible), then a one paragraph note. No other code blocks.",
         )
@@ -305,7 +339,7 @@ class Runners:
         prompt = self._prompt(
             "developer",
             constitution=self.doc_text("constitution"), spec=self.doc_text("spec"), plan=self.doc_text("plan"),
-            task=self._task_text(task), commands=cmd_hint, notes_from_previous_attempt=notes,
+            task=self._task_text(task), commands=cmd_hint, notes_from_previous_attempt=notes, **self._rejected_attempt(),
             instructions="You are working inside an isolated git worktree for this task. Edit files directly using your "
                          "tools. Do NOT run git commit, git checkout, or git merge (the orchestrator commits your "
                          "work). Do NOT touch protected paths. Reply with a short summary of what changed and which "
@@ -336,24 +370,77 @@ class Runners:
                 self.record("diff.patch", diff)
         return branch
 
+    def _timeout(self) -> float:
+        return float((self.cfg.get("limits") or {}).get("command_timeout_seconds") or COMMAND_TIMEOUT_DEFAULT)
+
+    def _run(self, name: str, cmd: str | list[str], cwd: Path, shell: bool) -> tuple[Optional[int], str, str, str]:
+        """Run one command in its own session. On timeout the whole process group gets SIGTERM, then
+        SIGKILL after 5s, so grandchildren die too. -> (exit code or None on timeout, stdout, stderr,
+        timeout message)."""
+        secs = self._timeout()
+        try:
+            p = subprocess.Popen(cmd, shell=shell, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, start_new_session=True)
+        except OSError as e:  # for example the verify binary is not installed
+            return 127, "", str(e), ""
+        try:
+            out, err = p.communicate(timeout=secs)
+            return p.returncode, out, err, ""
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(p.pid, signal.SIGTERM)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                p.wait(5)
+            with contextlib.suppress(ProcessLookupError):  # also reaps children that ignored SIGTERM
+                os.killpg(p.pid, signal.SIGKILL)
+            out, err = p.communicate()
+            tail = "\n".join((out + err).splitlines()[-200:])
+            shown = cmd if isinstance(cmd, str) else shlex.join(cmd)
+            return None, out, err, f"timeout: {name} exceeded {secs:g}s\n$ {shown}\n{tail}"
+
+    def verify_problem(self, task: Task) -> str:
+        """Why the task's `Verify:` line may not run (empty string when fine or absent)."""
+        if not task.verify:
+            return ""
+        allowed = self.cfg.get("verify_allowlist") or VERIFY_ALLOWLIST_DEFAULT
+        try:
+            argv = shlex.split(task.verify)
+        except ValueError as e:
+            return f"verify command not allowed: cannot parse {task.verify!r} ({e})"
+        if not argv or argv[0] not in allowed:
+            return f"verify command not allowed: {argv[0] if argv else ''!r} (allowed: {', '.join(allowed)})"
+        if ops := [t for t in argv if t in SHELL_OPERATORS]:
+            return f"verify command not allowed: shell operator {ops[0]!r} (no shell is used)"
+        return ""
+
     def verify(self, task: Task, branch: str) -> tuple[bool, str]:
-        """Run commands.build and commands.test inside a worktree for `branch` before review.
-        When neither command is configured, verification is a no-op pass."""
+        """Before review, in a worktree for `branch`: commands.build, then the task's `Verify:` line
+        (no shell, first token must be in verify_allowlist), then commands.test. The full test suite
+        is never skipped, so it always gates the merge. With nothing configured this is a pass."""
+        if problem := self.verify_problem(task):  # also checked before the developer runs
+            return False, problem
         cmds = self.cfg.get("commands") or {}
-        steps = [(k, cmds.get(k, "").strip()) for k in ("build", "test") if (cmds.get(k) or "").strip()]
+        steps: list[tuple[str, str | list[str], bool]] = []
+        if (cmds.get("build") or "").strip():
+            steps.append(("build", cmds["build"].strip(), True))
+        if task.verify:
+            argv = shlex.split(task.verify)  # verify_problem already vetted it
+            steps.append(("task verify", argv, False))
+        if (cmds.get("test") or "").strip():
+            steps.append(("test", cmds["test"].strip(), True))
         if not steps:
             return True, ""
         logs: list[str] = []
         with self._worktree(branch) as wt:
-            for name, cmd in steps:
-                p = subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True)
-                entry = f"$ {cmd}  ({name}, exit {p.returncode})\n--- stdout\n{p.stdout}\n--- stderr\n{p.stderr}"
-                logs.append(entry)
-                if p.returncode != 0:
-                    full = "\n".join(logs)
-                    self.record("verify.txt", full)
-                    tail = (p.stdout + p.stderr)[-2000:]
-                    return False, f"commands.{name} failed (exit {p.returncode}):\n$ {cmd}\n{tail}"
+            for name, cmd, shell in steps:
+                rc, out, err, timeout_msg = self._run(name, cmd, wt, shell)
+                shown = cmd if isinstance(cmd, str) else shlex.join(cmd)
+                logs.append(f"$ {shown}  ({name}, exit {rc if rc is not None else 'timeout'})\n--- stdout\n{out}\n--- stderr\n{err}")
+                if rc != 0:
+                    self.record("verify.txt", "\n".join(logs))
+                    if timeout_msg:
+                        return False, timeout_msg
+                    return False, f"commands.{name} failed (exit {rc}):\n$ {shown}\n{(out + err)[-2000:]}"
         self.record("verify.txt", "\n".join(logs))
         return True, ""
 
@@ -383,14 +470,17 @@ class Runners:
         if not cmd:
             raise AgentFailed("commands.smoke is empty in project.yaml")
         with self._worktree(branch) as wt:
-            p = subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True)
-        self.record("smoke.txt", f"$ {cmd}\nexit code: {p.returncode}\n--- stdout\n{p.stdout}\n--- stderr\n{p.stderr}")
+            rc, out, err, timeout_msg = self._run("smoke", cmd, wt, True)
+        code = rc if rc is not None else "timeout"
+        self.record("smoke.txt", f"$ {cmd}\nexit code: {code}\n--- stdout\n{out}\n--- stderr\n{err}")
         ev = self.dir / "logs" / "evidence" / task.id
         ev.mkdir(parents=True, exist_ok=True)
-        (ev / "stdout.txt").write_text(p.stdout)
-        (ev / "stderr.txt").write_text(p.stderr)
-        (ev / "exit_code.txt").write_text(f"{p.returncode}\n")
-        return p.returncode == 0, f"smoke exit {p.returncode}; evidence in {ev}\n{(p.stdout + p.stderr)[-1500:]}"
+        (ev / "stdout.txt").write_text(out)
+        (ev / "stderr.txt").write_text(err)
+        (ev / "exit_code.txt").write_text(f"{code}\n")
+        if timeout_msg:
+            return False, timeout_msg
+        return rc == 0, f"smoke exit {rc}; evidence in {ev}\n{(out + err)[-1500:]}"
 
     def merge(self, task: Task, branch: str) -> tuple[bool, str]:
         """Called by the orchestrator, never by an agent. Merges into foundry/integration inside a
