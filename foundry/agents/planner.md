@@ -17,8 +17,11 @@ Turn an approved spec into an ordered, testable task list. Runs before any code 
 5. Order tasks by dependency (`Depends on:`) and group by milestone (`Milestone:`) when applicable. Put the riskiest early.
 
 ## Outputs
+Your reply is the complete contents of tasks.md and nothing else: no preamble, no code fences, no findings
+section. Do not write files, do not use /tmp, do not use tools; the orchestrator saves your reply itself.
+Put open questions and risks inside tasks.md as a `## Notes` section after the last task, never as a separate part.
 - Tasks in the format of `foundry/templates/tasks.md` (`Satisfies:`, `Inputs:`, `Outputs:`, `Done when:`, `Allowed models:`, optional `Depends on:` and `Milestone:`, and `Status: open`)
-- A short findings list for the human: open questions, risks, anything the spec leaves out
+- Inside that same reply, a short notes section for the human: open questions, risks, anything the spec leaves out
 
 ## Must refuse
 - Starting development.

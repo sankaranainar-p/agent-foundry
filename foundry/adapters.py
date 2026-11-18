@@ -87,7 +87,14 @@ class Reply(str):
 
 def claude_cli(prompt: str, patterns: Iterable[str] = (), timeout: float = 600, run: Callable = subprocess.run,
                extra_args: Iterable[str] = (), cwd: str | None = None) -> str:
-    proc = _run(run, ["claude", "-p", prompt, "--output-format", "json", *extra_args], timeout, cwd=cwd)
+    """Without cwd this is a plain text call: no tools at all (`--tools ""`) and an empty temp dir as
+    cwd, so the model can neither act nor see files. claude_agent passes cwd and its own flags."""
+    cmd = ["claude", "-p", prompt, "--output-format", "json", *extra_args]
+    if cwd is not None:
+        proc = _run(run, cmd, timeout, cwd=cwd)
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = _run(run, [*cmd, "--tools", ""], timeout, cwd=tmp)
     try:
         data = json.loads(proc.stdout)
     except (json.JSONDecodeError, TypeError):

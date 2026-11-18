@@ -12,7 +12,7 @@ from pathlib import Path
 from .adapters import build_agent, build_providers, load_config
 from .orchestrator import run_queue, run_until_done, write_status
 from .runners import Runners
-from .tasks import validate_tasks
+from .tasks import parse_tasks, validate_tasks
 from .wrapper import ModelWrapper
 
 PARKING_SPLIT = re.compile(r"(?m)^#\s+Parking\s+Lot\b")
@@ -60,12 +60,20 @@ def main(argv=None, providers=None, agent_runner=None) -> int:
     if args.cmd == "plan":
         out = project / "tasks.proposed.md"
         text = runners.planner()
+        reply = project / "logs" / "planner-reply.md"
+        reply.parent.mkdir(exist_ok=True)
+        reply.write_text(text)
+        if not parse_tasks(text):
+            print(f"planner reply has no tasks (headings must look like `## T-001: Title`); full reply in {reply}",
+                  file=sys.stderr)
+            return 1
         out.write_text(text)
         problems = validate_tasks(text, runners.doc_text("spec"))
         if problems:
             print(f"wrote {out}, with validation warnings:", file=sys.stderr)
             for p in problems:
                 print(f"  - {p}", file=sys.stderr)
+            return 1
         print(f"wrote {out}. Review it, then move it over tasks.md to approve.")
         return 0
 

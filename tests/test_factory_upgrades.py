@@ -253,3 +253,66 @@ def test_cost_and_usage_logged_and_reported_in_status(proj):
     assert calls[0]["cost_usd"] == 0.10 and calls[0]["input_tokens"] == 500 and "duration_s" in calls[0]
     status = (proj / "logs" / "status.md").read_text()
     assert "- cost so far: $0.15" in status
+
+
+def test_claude_cli_is_tool_free_in_an_empty_temp_cwd():
+    seen = {}
+
+    def fake_run(cmd, capture_output, text, timeout, cwd):
+        seen["cmd"], seen["cwd"] = cmd, cwd
+        seen["empty"] = not __import__("os").listdir(cwd)
+
+        class P:
+            returncode = 0
+            stdout = json.dumps({"result": "ok"})
+            stderr = ""
+
+        return P()
+
+    assert claude_cli("hi", run=fake_run) == "ok"
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--tools") + 1] == ""
+    assert "--allowedTools" not in cmd and "--permission-mode" not in cmd
+    assert seen["empty"] and not __import__("os").path.exists(seen["cwd"])  # fresh dir, removed afterwards
+
+
+def test_claude_agent_keeps_tools_unrestricted_by_tools_flag(tmp_path):
+    seen = {}
+
+    def fake_run(cmd, capture_output, text, timeout, cwd):
+        seen["cmd"], seen["cwd"] = cmd, cwd
+
+        class P:
+            returncode = 0
+            stdout = json.dumps({"result": "ok"})
+            stderr = ""
+
+        return P()
+
+    claude_agent("x", str(tmp_path), run=fake_run)
+    assert "--tools" not in seen["cmd"] and seen["cwd"] == str(tmp_path)
+    assert seen["cmd"][seen["cmd"].index("--allowedTools") + 1] == "Read,Edit,Write,Glob,Grep"
+
+
+def test_plan_with_zero_tasks_exits_1_writes_no_proposal_and_saves_reply(proj, capsys):
+    prov = (lambda p: "I wrote it to /tmp/tasks.md, please review.", lambda p: "x", "m")
+    assert main(["plan", str(proj)], providers=prov) == 1
+    assert not (proj / "tasks.proposed.md").exists()
+    assert (proj / "logs" / "planner-reply.md").read_text() == "I wrote it to /tmp/tasks.md, please review."
+    assert "no tasks" in capsys.readouterr().err
+
+
+def test_plan_with_validation_problems_still_writes_file_but_exits_1(proj):
+    reply = TASKS.replace("Satisfies: R-001\n", "") % "Claude"
+    assert validate_tasks(reply)  # precondition: the reply has problems
+    prov = (lambda p: reply, lambda p: "x", "m")
+    assert main(["plan", str(proj)], providers=prov) == 1
+    assert (proj / "tasks.proposed.md").read_text() == reply
+    assert (proj / "logs" / "planner-reply.md").read_text() == reply
+
+
+def test_planner_prompt_demands_reply_only_no_files(proj):
+    from foundry.runners import AGENTS
+
+    text = (AGENTS / "planner.md").read_text()
+    assert "complete contents of tasks.md and nothing else" in text and "do not use /tmp" in text
