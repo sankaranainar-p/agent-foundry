@@ -64,12 +64,37 @@ def _git(cwd: Path, *args: str, check: bool = True) -> str:
 
 
 def _git_apply(cwd: Path, *args: str) -> str:
-    """git apply; on any failure retry once with --recount --ignore-whitespace, since models often
-    get hunk line counts or trailing whitespace wrong."""
+    """git apply --recount (git trusts header counts otherwise and silently drops extra trailing
+    lines); on failure retry once with --ignore-whitespace too."""
     try:
-        return _git(cwd, "apply", *args)
+        return _git(cwd, "apply", "--recount", *args)
     except AgentFailed:
         return _git(cwd, "apply", "--recount", "--ignore-whitespace", *args)
+
+
+HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
+def hunk_count_warnings(patch: str) -> list[str]:
+    """One line per hunk whose header counts differ from its body."""
+    lines, out, i = patch.rstrip("\n").split("\n"), [], 0
+    while i < len(lines):
+        m = HUNK_HEADER.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        head, old, new, i = lines[i], 0, 0, i + 1
+        while i < len(lines) and not lines[i].startswith(("@@", "diff --git")) and not (
+            lines[i].startswith("--- ") and lines[i + 1 : i + 2] and lines[i + 1].startswith("+++ ")
+        ):
+            c = lines[i][:1]
+            old += c in ("", " ", "-")
+            new += c in ("", " ", "+")
+            i += 1
+        want = (int(m.group(1) or 1), int(m.group(2) or 1))
+        if want != (old, new):
+            out.append(f"{head}: header says -{want[0]} +{want[1]}, body has -{old} +{new}")
+    return out
 
 
 def parse_verdict(text: str) -> bool:
@@ -354,6 +379,8 @@ class Runners:
         patch.parent.mkdir(exist_ok=True)
         patch.write_text(m.group(1) + "\n")
         self.record("diff.patch", m.group(1) + "\n")
+        if warns := hunk_count_warnings(m.group(1)):
+            self.record("patch-warnings.txt", "\n".join(warns) + "\n")
         if hits := self._protected_hits(patch):
             raise AgentFailed(f"diff touches protected paths, remove these changes: {', '.join(hits)}")
         with self._worktree(branch, create=True, start=self.integ) as wt:

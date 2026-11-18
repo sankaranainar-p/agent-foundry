@@ -233,3 +233,18 @@ def test_reviewer_context_includes_sibling_files(proj):
     ctx = dev._touched_context(branch)
     assert "// touched" in ctx and "SIBLING" in ctx
     assert "blob.bin" not in ctx and "EXCLUDED" not in ctx
+
+
+def _new_file_patch(header: str, n: int) -> str:
+    body = "".join(f"+l{i}\n" for i in range(1, n + 1))
+    return f"```diff\ndiff --git a/n.txt b/n.txt\nnew file mode 100644\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 {header} @@\n{body}```\n"
+
+
+@pytest.mark.parametrize("header,n,warned", [("+1,3", 4, True), ("+1,4", 4, False), ("+1,9", 4, True)])
+def test_new_file_hunk_counts(proj, header, n, warned):
+    dev, _ = runners(proj, lambda p: _new_file_patch(header, n))
+    dev.set_attempt("T-1", 1)
+    branch = dev.developer(task(proj))
+    assert git(proj, "show", f"{branch}:n.txt") == "l1\nl2\nl3\nl4\n"
+    warn = list(proj.rglob("patch-warnings.txt"))
+    assert bool(warn) == warned and (not warned or header in warn[0].read_text())
