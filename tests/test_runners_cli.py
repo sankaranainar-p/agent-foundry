@@ -209,3 +209,27 @@ def test_reviewer_unparseable_reply_is_not_approved_and_notes_keep_raw_text(proj
     r, _ = runners(proj, lambda p: "Hmm, hard to say.")
     ok, notes = r.reviewer(task(proj), branch)
     assert ok is False and "no clear verdict" in notes and "Hmm, hard to say." in notes
+
+
+def test_developer_recounts_patch_with_wrong_hunk_counts(proj):
+    bad = DIFF.replace("@@ -0,0 +1 @@\n+hi", "@@ -0,0 +1,5 @@\n+hi\n+there")  # header claims 5 lines, has 2
+    dev, _ = runners(proj, lambda p: bad)
+    branch = dev.developer(task(proj))
+    assert git(proj, "show", f"{branch}:hello.txt") == "hi\nthere\n"
+
+
+def test_reviewer_context_includes_sibling_files(proj):
+    (proj / "core").mkdir()
+    (proj / "core" / "index.go").write_text("package core\n")
+    (proj / "core" / "names.go").write_text("package core // SIBLING\n")
+    (proj / "core" / "blob.bin").write_bytes(b"\xff\x00\xfe")
+    (proj / "core" / "go.sum").write_text("EXCLUDED\n")
+    git(proj, "add", "-A")
+    git(proj, "commit", "-q", "-m", "core")
+    d = ("```diff\ndiff --git a/core/index.go b/core/index.go\n--- a/core/index.go\n+++ b/core/index.go\n"
+         "@@ -1 +1,2 @@\n package core\n+// touched\n```\n")
+    dev, _ = runners(proj, lambda p: d)
+    branch = dev.developer(task(proj))
+    ctx = dev._touched_context(branch)
+    assert "// touched" in ctx and "SIBLING" in ctx
+    assert "blob.bin" not in ctx and "EXCLUDED" not in ctx

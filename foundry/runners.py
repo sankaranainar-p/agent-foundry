@@ -32,6 +32,7 @@ AGENTS = Path(__file__).resolve().parent / "agents"
 SNAPSHOT_CHARS = 60_000
 INTEGRATION = "foundry/integration"
 REJECTED_HEADING = "Rejected attempt: do not reapply as is; fix the cause"
+SIBLING_CHARS = 40_000
 REJECTED_DIFF_CHARS = 20 * 1024
 COMMAND_TIMEOUT_DEFAULT = 300
 SHELL_OPERATORS = {";", "&", "&&", "|", "||", ">", ">>", "<"}
@@ -60,6 +61,15 @@ def _git(cwd: Path, *args: str, check: bool = True) -> str:
     if check and p.returncode != 0:
         raise AgentFailed(f"git {' '.join(args[:2])} failed: {(p.stderr or p.stdout)[:300]}")
     return p.stdout
+
+
+def _git_apply(cwd: Path, *args: str) -> str:
+    """git apply; on any failure retry once with --recount --ignore-whitespace, since models often
+    get hunk line counts or trailing whitespace wrong."""
+    try:
+        return _git(cwd, "apply", *args)
+    except AgentFailed:
+        return _git(cwd, "apply", "--recount", "--ignore-whitespace", *args)
 
 
 def parse_verdict(text: str) -> bool:
@@ -221,6 +231,28 @@ class Runners:
                 continue
             used += len(body)
             out.append(f"--- {name}\n{body}")
+        # Siblings: other tracked source files in the same directories, own 40k budget.
+        exc = ctx.get("exclude") if "exclude" in ctx else SNAPSHOT_EXCLUDE_DEFAULT
+        prot = self._protected_patterns()  # docs like plan.md are withheld from the reviewer on purpose
+        seen, used = set(names), 0
+        for d in dict.fromkeys(posixpath.dirname(n) for n in names):
+            listing = _git(self.dir, "ls-tree", "-z", branch, *([d + "/"] if d else []), check=False)
+            for entry in listing.split("\0"):
+                meta, _, sib = entry.partition("\t")
+                if not sib or meta.split()[1] != "blob" or sib in seen or _match_any(sib, prot) or (exc and _match_any(sib, exc)):
+                    continue
+                seen.add(sib)
+                try:
+                    body = _git(self.dir, "show", f"{branch}:{sib}", check=False)
+                except UnicodeDecodeError:
+                    continue
+                if not body or "\0" in body:
+                    continue
+                if used + len(body) > SIBLING_CHARS:
+                    out.append(f"--- {sib} (omitted, size cap)")
+                    continue
+                used += len(body)
+                out.append(f"--- {sib}\n{body}")
         return "\n".join(out)
 
     def ensure_integration(self) -> None:
@@ -262,7 +294,7 @@ class Runners:
         return [raw for raw in paths if _match_any(raw, pats)]
 
     def _protected_hits(self, patch: Path) -> list[str]:
-        toks = _git(self.dir, "apply", "--numstat", "-z", str(patch)).split("\0")
+        toks = _git_apply(self.dir, "--numstat", "-z", str(patch)).split("\0")
         paths, i = [], 0
         while i < len(toks):
             parts = toks[i].split("\t", 2)
@@ -325,7 +357,7 @@ class Runners:
         if hits := self._protected_hits(patch):
             raise AgentFailed(f"diff touches protected paths, remove these changes: {', '.join(hits)}")
         with self._worktree(branch, create=True, start=self.integ) as wt:
-            _git(wt, "apply", "--index", str(patch))  # stages exactly the patched files
+            _git_apply(wt, "--index", str(patch))  # stages exactly the patched files
             msg = f"{task.id}: {task.title}" + (f" {result.label}" if result.label else "")
             _git(wt, "commit", "-q", "-m", msg)
         return branch
