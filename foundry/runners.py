@@ -64,37 +64,48 @@ def _git(cwd: Path, *args: str, check: bool = True) -> str:
 
 
 def _git_apply(cwd: Path, *args: str) -> str:
-    """git apply --recount (git trusts header counts otherwise and silently drops extra trailing
-    lines); on failure retry once with --ignore-whitespace too."""
+    """Plain git apply (patches are normalized by recount_patch first); retry once with --ignore-whitespace."""
     try:
-        return _git(cwd, "apply", "--recount", *args)
+        return _git(cwd, "apply", *args)
     except AgentFailed:
-        return _git(cwd, "apply", "--recount", "--ignore-whitespace", *args)
+        return _git(cwd, "apply", "--ignore-whitespace", *args)
 
 
-HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 
 
-def hunk_count_warnings(patch: str) -> list[str]:
-    """One line per hunk whose header counts differ from its body."""
-    lines, out, i = patch.rstrip("\n").split("\n"), [], 0
+def recount_patch(text: str) -> tuple[str, list[str]]:
+    """Rewrite every hunk header so its counts match the body. Returns (patch, warnings), one
+    warning per header that was wrong. git apply trusts header counts: too small silently
+    truncates, so we never let it see a wrong one."""
+    lines = text.split("\n")
+    trailing = lines[-1] == ""  # final empty string from the trailing newline is not a body line
+    if trailing:
+        lines.pop()
+    out, warns, i = [], [], 0
     while i < len(lines):
         m = HUNK_HEADER.match(lines[i])
         if not m:
+            out.append(lines[i])
             i += 1
             continue
-        head, old, new, i = lines[i], 0, 0, i + 1
-        while i < len(lines) and not lines[i].startswith(("@@", "diff --git")) and not (
-            lines[i].startswith("--- ") and lines[i + 1 : i + 2] and lines[i + 1].startswith("+++ ")
+        j, old, new = i + 1, 0, 0
+        while j < len(lines) and not lines[j].startswith(("@@", "diff ")) and not (
+            lines[j].startswith("--- ") and lines[j + 1 : j + 2] and lines[j + 1].startswith("+++ ")
+            and lines[j + 2 : j + 3] and lines[j + 2].startswith("@@")
         ):
-            c = lines[i][:1]
-            old += c in ("", " ", "-")
-            new += c in ("", " ", "+")
-            i += 1
-        want = (int(m.group(1) or 1), int(m.group(2) or 1))
+            c = lines[j][:1]
+            if c != "\\":
+                old += c in ("", " ", "-")
+                new += c in ("", " ", "+")
+            j += 1
+        want = (int(m.group(2) or 1), int(m.group(4) or 1))
         if want != (old, new):
-            out.append(f"{head}: header says -{want[0]} +{want[1]}, body has -{old} +{new}")
-    return out
+            warns.append(f"{lines[i]}: header says -{want[0]} +{want[1]}, body has -{old} +{new}")
+        out.append(f"@@ -{m.group(1)},{old} +{m.group(3)},{new} @@{m.group(5)}")
+        out += lines[i + 1 : j]
+        i = j
+    return "\n".join(out) + ("\n" if trailing else ""), warns
 
 
 def parse_verdict(text: str) -> bool:
@@ -377,9 +388,10 @@ class Runners:
         branch = self.task_branch(task)
         patch = self.dir / "logs" / f"{task.id}.patch"
         patch.parent.mkdir(exist_ok=True)
-        patch.write_text(m.group(1) + "\n")
         self.record("diff.patch", m.group(1) + "\n")
-        if warns := hunk_count_warnings(m.group(1)):
+        fixed, warns = recount_patch(m.group(1) + "\n")
+        patch.write_text(fixed)
+        if warns:
             self.record("patch-warnings.txt", "\n".join(warns) + "\n")
         if hits := self._protected_hits(patch):
             raise AgentFailed(f"diff touches protected paths, remove these changes: {', '.join(hits)}")
