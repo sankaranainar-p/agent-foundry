@@ -90,20 +90,27 @@ def recount_patch(text: str) -> tuple[str, list[str]]:
             i += 1
             continue
         j, old, new = i + 1, 0, 0
+        new_file = m.group(1) == "0" and m.group(2) == "0"  # nothing to be context for
+        body = []
         while j < len(lines) and not lines[j].startswith(("@@", "diff ")) and not (
             lines[j].startswith("--- ") and lines[j + 1 : j + 2] and lines[j + 1].startswith("+++ ")
             and lines[j + 2 : j + 3] and lines[j + 2].startswith("@@")
         ):
-            c = lines[j][:1]
+            line = lines[j]
+            if new_file and line == "":
+                line = "+"
+                warns.append(f"{lines[i]}: unprefixed empty line in new-file hunk (body line {j - i}) treated as added blank line")
+            c = line[:1]
             if c != "\\":
                 old += c in ("", " ", "-")
                 new += c in ("", " ", "+")
+            body.append(line)
             j += 1
         want = (int(m.group(2) or 1), int(m.group(4) or 1))
         if want != (old, new):
             warns.append(f"{lines[i]}: header says -{want[0]} +{want[1]}, body has -{old} +{new}")
         out.append(f"@@ -{m.group(1)},{old} +{m.group(3)},{new} @@{m.group(5)}")
-        out += lines[i + 1 : j]
+        out += body
         i = j
     return "\n".join(out) + ("\n" if trailing else ""), warns
 

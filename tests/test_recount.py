@@ -45,3 +45,12 @@ def test_modify_with_context(tmp_path):
     _repo(tmp_path, {"a.txt": "1\n2\n3\n4\n5\n"})
     assert _apply(tmp_path, "--- a/a.txt\n+++ b/a.txt\n@@ -2,3 +2,3 @@\n 2\n-3\n+three\n 4\n") == []
     assert (tmp_path / "a.txt").read_text() == "1\n2\nthree\n4\n5\n"
+
+
+def test_unprefixed_blank_in_new_file_is_added_line(tmp_path):
+    _repo(tmp_path)
+    patch = ("--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1,3 @@\n+a\n\n+c\n"
+             "--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1,1 @@\n+b\n")
+    warns = _apply(tmp_path, patch)
+    assert (tmp_path / "a.txt").read_text() == "a\n\nc\n" and (tmp_path / "b.txt").read_text() == "b\n"
+    assert len(warns) == 1 and "unprefixed empty line" in warns[0]
