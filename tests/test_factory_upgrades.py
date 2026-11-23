@@ -232,6 +232,19 @@ def test_crash_recovery_marks_already_merged_task_done_without_rerunning(proj):
     assert parse_tasks((proj / "tasks.md").read_text())[0].status == "done"
 
 
+def test_branch_with_no_commits_is_not_already_merged(proj):
+    r, _ = runners(proj, lambda p: DIFF)
+    t = task(proj)
+    r.ensure_integration()
+    git(proj, "branch", r.task_branch(t), r.integ)
+    # integration tip is a non-task merge commit and the empty task branch sits on it (the T-016 case)
+    git(proj, "checkout", "-q", r.integ)
+    git(proj, "commit", "-q", "--allow-empty", "-m", "Merge main into foundry/integration")
+    git(proj, "branch", "-f", r.task_branch(t), r.integ)
+    git(proj, "checkout", "-q", r.base)
+    assert r.is_merged(t) is False
+
+
 def test_cli_audit_splits_gap_report_and_parking_lot(proj):
     reply = "# Gap Report\n| R-001 | met | hello.txt |\n\n# Parking Lot\n- extra feature: low cost\n"
     prov = (lambda p: reply, lambda p: "", "m")

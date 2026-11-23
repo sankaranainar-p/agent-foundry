@@ -322,21 +322,15 @@ class Runners:
         return f"{task.id.lower()}-{_slug(task.title)}"
 
     def is_merged(self, task: Task) -> bool:
-        """True if the task's branch already exists and its tip is an ancestor of integration
-        (meaning an earlier run merged it and crashed before updating tasks.md)."""
+        """True only if integration holds a merge commit the orchestrator made for this task
+        ("Merge <id>: ..." from merge()). Ancestry alone never counts: a branch with no commits
+        is an ancestor of integration, and must not be mistaken for finished work."""
         if not (self.dir / ".git").exists():
-            return False
-        branch = self.task_branch(task)
-        if not _git(self.dir, "rev-parse", "--verify", "--quiet", branch, check=False).strip():
             return False
         if not _git(self.dir, "rev-parse", "--verify", "--quiet", self.integ, check=False).strip():
             return False
-        # Must also have a merge or commit for this task past the base branch, not an empty branch at base.
-        ahead = _git(self.dir, "rev-list", "--count", f"{self.base}..{branch}", check=False).strip()
-        if not ahead or ahead == "0":
-            return False
-        rc = subprocess.run(["git", "merge-base", "--is-ancestor", branch, self.integ], cwd=self.dir).returncode
-        return rc == 0
+        out = _git(self.dir, "log", "--merges", "--format=%H", "-1", f"--grep=^Merge {task.id}:", self.integ, check=False)
+        return bool(out.strip())
 
     def _protected_patterns(self) -> list[str]:
         """PROTECTED_DEFAULT plus cfg protected_paths. The config can only add, never replace."""
