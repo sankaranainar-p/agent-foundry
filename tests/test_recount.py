@@ -54,3 +54,15 @@ def test_unprefixed_blank_in_new_file_is_added_line(tmp_path):
     warns = _apply(tmp_path, patch)
     assert (tmp_path / "a.txt").read_text() == "a\n\nc\n" and (tmp_path / "b.txt").read_text() == "b\n"
     assert len(warns) == 1 and "unprefixed empty line" in warns[0]
+
+
+def test_added_lines_without_trailing_context_mid_file(tmp_path):
+    src = "type A struct{}\n}\n\ntype B struct{}\n"
+    _repo(tmp_path, {"a.go": src})
+    patch = "--- a/a.go\n+++ b/a.go\n@@ -2,1 +2,3 @@\n }\n+\n+type New struct{}\n"
+    used = []
+    fixed, _ = recount_patch(patch)
+    (tmp_path / "p.patch").write_text(fixed)
+    _git_apply(tmp_path, "p.patch", used=used)
+    got = (tmp_path / "a.go").read_text()
+    assert got == "type A struct{}\n}\n\ntype New struct{}\n\ntype B struct{}\n" and used == ["--unidiff-zero"]

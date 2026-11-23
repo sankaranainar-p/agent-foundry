@@ -63,12 +63,23 @@ def _git(cwd: Path, *args: str, check: bool = True) -> str:
     return p.stdout
 
 
-def _git_apply(cwd: Path, *args: str) -> str:
-    """Plain git apply (patches are normalized by recount_patch first); retry once with --ignore-whitespace."""
-    try:
-        return _git(cwd, "apply", *args)
-    except AgentFailed:
-        return _git(cwd, "apply", "--ignore-whitespace", *args)
+APPLY_STEPS = [[], ["--ignore-whitespace"], ["--unidiff-zero"], ["--unidiff-zero", "--ignore-whitespace"]]
+
+
+def _git_apply(cwd: Path, *args: str, used: list[str] | None = None) -> str:
+    """Patches are normalized by recount_patch first. Try plain, then --ignore-whitespace, then --unidiff-zero
+    (hunks ending in added lines with no trailing context are otherwise anchored at EOF), then both.
+    Appends the flags of the step that worked to `used`; the last failure propagates."""
+    for i, flags in enumerate(APPLY_STEPS):
+        try:
+            out = _git(cwd, "apply", *flags, *args)
+        except AgentFailed:
+            if i == len(APPLY_STEPS) - 1:
+                raise
+            continue
+        if used is not None and flags:
+            used.append(" ".join(flags))
+        return out
 
 
 HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
@@ -398,12 +409,14 @@ class Runners:
         self.record("diff.patch", m.group(1) + "\n")
         fixed, warns = recount_patch(m.group(1) + "\n")
         patch.write_text(fixed)
-        if warns:
-            self.record("patch-warnings.txt", "\n".join(warns) + "\n")
         if hits := self._protected_hits(patch):
             raise AgentFailed(f"diff touches protected paths, remove these changes: {', '.join(hits)}")
         with self._worktree(branch, create=True, start=self.integ) as wt:
-            _git_apply(wt, "--index", str(patch))  # stages exactly the patched files
+            used: list[str] = []
+            _git_apply(wt, "--index", str(patch), used=used)  # stages exactly the patched files
+            warns += [f"git apply needed fallback: {u}" for u in used]
+            if warns:
+                self.record("patch-warnings.txt", "\n".join(warns) + "\n")
             msg = f"{task.id}: {task.title}" + (f" {result.label}" if result.label else "")
             _git(wt, "commit", "-q", "-m", msg)
         return branch
