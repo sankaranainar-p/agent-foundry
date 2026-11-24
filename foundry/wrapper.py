@@ -138,7 +138,7 @@ class ModelWrapper:
         return self._pinned or self._load()["tier"]
 
     def call(self, prompt: str, bounded: bool = False, primary: Optional[Provider] = None,
-             role: str = "") -> CallResult:
+             role: str = "", sections: Optional[dict[str, int]] = None) -> CallResult:
         """Call a model. bounded=True means the task is allowed to run on the fallback model.
         primary overrides the primary provider for this call only (for example a tool-using agent
         run in a worktree); rate limits and tiers behave exactly as for the default primary."""
@@ -160,14 +160,15 @@ class ModelWrapper:
                 self._log({"event": "rate_limited", "tier": TIER_PRIMARY, "resume_at": state["resume_at"]})
                 if pinned:
                     raise TierChanged(state["resume_at"], "primary rate limited mid-task")
-                return self._call_fallback(prompt, bounded, state, role)
-            self._log(self._usage(state, text, prompt, started, role, TIER_PRIMARY, self.primary_name))
+                return self._call_fallback(prompt, bounded, state, role, sections)
+            self._log(self._usage(state, text, prompt, started, role, TIER_PRIMARY, self.primary_name, sections))
             self._save(state)
             return CallResult(str(text), TIER_PRIMARY, self.primary_name, "")
 
-        return self._call_fallback(prompt, bounded, state, role)
+        return self._call_fallback(prompt, bounded, state, role, sections)
 
-    def _usage(self, state: dict, text: str, prompt: str, started: float, role: str, tier: str, model: str) -> dict:
+    def _usage(self, state: dict, text: str, prompt: str, started: float, role: str, tier: str, model: str,
+               sections: Optional[dict[str, int]] = None) -> dict:
         """One call event: role, sizes, duration, and cost and tokens when the adapter reports them
         (claude_cli returns a Reply with .meta). Cost also accumulates in state["cost_usd"]."""
         meta = getattr(text, "meta", None) or {}
@@ -176,6 +177,8 @@ class ModelWrapper:
         event = {"event": "call", "tier": tier, "model": model, "role": role,
                  "duration_s": round(time.monotonic() - started, 3),
                  "prompt_chars": len(prompt), "reply_chars": len(text)}
+        if sections:
+            event["section_chars"] = sections
         event.update({k: v for k, v in meta.items() if v is not None})
         return event
 
@@ -198,7 +201,8 @@ class ModelWrapper:
         self._save(state)
         self._log({"event": "returned_to_primary"})
 
-    def _call_fallback(self, prompt: str, bounded: bool, state: dict, role: str = "") -> CallResult:
+    def _call_fallback(self, prompt: str, bounded: bool, state: dict, role: str = "",
+                       sections: Optional[dict[str, int]] = None) -> CallResult:
         if not bounded:
             # Unbounded work waits for the primary model. It never runs on the fallback.
             self._log({"event": "paused", "reason": "unbounded task, primary limited"})
@@ -213,6 +217,6 @@ class ModelWrapper:
             self._log({"event": "paused", "reason": "fallback limited", "resume_at": state["resume_at"]})
             raise Paused(state["resume_at"], "fallback limited")
         state["flash_commits"] = state.get("flash_commits", 0) + 1
-        self._log(self._usage(state, text, prompt, started, role, TIER_FALLBACK, self.fallback_name))
+        self._log(self._usage(state, text, prompt, started, role, TIER_FALLBACK, self.fallback_name, sections))
         self._save(state)
         return CallResult(str(text), TIER_FALLBACK, self.fallback_name, self.fallback_label)

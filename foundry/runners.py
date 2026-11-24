@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from .orchestrator import AgentFailed
-from .tasks import Task
+from .tasks import Task, parse_tasks
 from .wrapper import TIER_PRIMARY, ModelWrapper
 
 AGENTS = Path(__file__).resolve().parent / "agents"
@@ -54,6 +54,82 @@ APPROVE_LINE = re.compile(
     r"^(?:verdict\s*:\s*)?approved?\b(?!.*\b(?:but|however|except|unless|although|not|changes|reject\w*)\b)"
 )
 DIFF_BLOCK = re.compile(r"```(?:diff|patch)\n(.*?)\n```", re.S)
+DECL_LINE = re.compile(r"^\s*(?:func|type|var|const|def|class|interface)\b")
+COMMENT_LINE = re.compile(r"^\s*(?://|#|/\*|\*)")
+DECL_NAME = re.compile(
+    r"^\s*(?:"
+    r"func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)"
+    r"|type\s+([A-Za-z_]\w*)"
+    r"|(?:var|const)\s+([A-Za-z_]\w*)"
+    r"|(?:def|class|interface)\s+([A-Za-z_]\w*)"
+    r")"
+)
+IDENT_TOKEN = re.compile(r"\b[A-Za-z_]\w*\b")
+PATH_TOKEN = re.compile(r"[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+")
+DECL_STOPWORDS = {
+    "main", "init", "str", "int", "bool", "err", "error", "string", "true", "false", "nil", "none", "self", "cls",
+}
+
+
+def _is_test_file(path: str) -> bool:
+    base = posixpath.basename(_norm(path)).casefold()
+    return (
+        base.endswith(("_test.go", "_test.py", ".test.ts", ".test.js", ".spec.ts", ".spec.js"))
+        or (base.startswith("test_") and base.endswith(".py"))
+    )
+
+
+def _extract_declarations(body: str) -> str:
+    """Keep only lines starting with func, type, var, const, def, class, or interface, plus their
+    immediately preceding comment line."""
+    lines = body.splitlines()
+    out: list[str] = []
+    added_prev = False
+    for idx, line in enumerate(lines):
+        if DECL_LINE.match(line):
+            if idx > 0 and COMMENT_LINE.match(lines[idx - 1]) and not added_prev:
+                out.append(lines[idx - 1])
+            out.append(line)
+            added_prev = True
+        else:
+            added_prev = False
+    return ("\n".join(out) + "\n") if out else ""
+
+
+def _declared_identifiers(body: str) -> set[str]:
+    names: set[str] = set()
+    for line in body.splitlines():
+        if m := DECL_NAME.match(line):
+            ident = next((g for g in m.groups() if g), "")
+            if len(ident) >= 3 and ident.casefold() not in DECL_STOPWORDS and not ident.startswith(("Test", "test_", "Benchmark")):
+                names.add(ident)
+    return names
+
+
+def _task_named_paths(task: Task, tracked: Iterable[str]) -> tuple[set[str], set[str]]:
+    """Return (focus_files, focus_dirs) from a task's Inputs and Outputs against tracked repo paths."""
+    raw = f"{task.fields.get('Inputs', '')}\n{task.fields.get('Outputs', '')}"
+    tracked_list = list(tracked)
+    tracked_norm = {_norm(p): p for p in tracked_list}
+    files: set[str] = set()
+    dirs: set[str] = set()
+    for p in tracked_list:
+        np = _norm(p)
+        if np and np in raw:
+            files.add(p)
+            dirs.add(posixpath.dirname(np))
+    for tok in PATH_TOKEN.findall(raw):
+        nt = _norm(tok.strip(".,;:()[]`\"'"))
+        if nt in tracked_norm:
+            files.add(tracked_norm[nt])
+            dirs.add(posixpath.dirname(nt))
+        elif "/" in nt:
+            dirs.add(posixpath.dirname(nt))
+    for tok in re.findall(r"[A-Za-z0-9_./-]+/", raw):
+        nd = _norm(tok.rstrip("/"))
+        if any(posixpath.dirname(_norm(p)) == nd for p in tracked_list):
+            dirs.add(nd)
+    return files, dirs
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> str:
@@ -217,9 +293,24 @@ class Runners:
         return (AGENTS / f"{role}.md").read_text()
 
     def _prompt(self, role: str, **sections: str) -> str:
-        parts = [self._role_text(role)]
-        parts += [f"\n=== {k.replace('_', ' ')} ===\n{v}" for k, v in sections.items() if v]
-        return "\n".join(parts)
+        text, _ = self._build_prompt(role, **sections)
+        return text
+
+    def _build_prompt(self, role: str, **sections: str) -> tuple[str, dict[str, int]]:
+        role_text = self._role_text(role)
+        sizes: dict[str, int] = {"role": len(role_text)}
+        parts = [role_text]
+        for k, v in sections.items():
+            if v:
+                key = k.replace("_", " ")
+                sizes[key] = len(v)
+                parts.append(f"\n=== {key} ===\n{v}")
+        return "\n".join(parts), sizes
+
+    def _call_role(self, role: str, bounded: bool = False, primary: Optional[Callable[[str], str]] = None,
+                   **sections: str):
+        prompt, sizes = self._build_prompt(role, **sections)
+        return self.wrapper.call(prompt, bounded=bounded, primary=primary, role=role, sections=sizes)
 
     def _rejected_attempt(self) -> dict[str, str]:
         """On attempt > 1: the previous attempt's diff (capped) and failing output tail, as a prompt section.
@@ -245,13 +336,25 @@ class Runners:
         has = _git(self.dir, "rev-parse", "--verify", "--quiet", self.integ, check=False).strip()
         return self.integ if has else self.base
 
-    def _snapshot(self) -> str:
+    def _snapshot(self, first: Iterable[str] = (), task: Optional[Task] = None) -> str:
+        """Repo files as prompt text. Files in `first` are sent before the rest so the size cap hits them last.
+        When context.mode is 'focused' and a task is given, include full text for:
+        1. files named in the task's Inputs and Outputs,
+        2. other source (non-test) files in the same directories as those files,
+        3. any file (such as a test file) that defines helpers/identifiers used by the focus files.
+        For every other tracked file under the cap, include only declaration lines (func, type, var,
+        const, def, class, interface, plus their preceding comment line) and note that in the prompt."""
         ctx = self.cfg.get("context") or {}
         cap = int(ctx.get("max_chars") or SNAPSHOT_CHARS)
         inc = ctx.get("include") or []
         exc = ctx.get("exclude") if "exclude" in ctx else SNAPSHOT_EXCLUDE_DEFAULT
-        ref, out, used = self._tip(), [], 0
-        for name in _git(self.dir, "ls-tree", "-r", "--name-only", ref).splitlines():
+        focused = str(ctx.get("mode") or "full").strip().lower() == "focused" and task is not None
+        ref = self._tip()
+        names = _git(self.dir, "ls-tree", "-r", "--name-only", ref).splitlines()
+
+        filtered: list[str] = []
+        bodies: dict[str, str] = {}
+        for name in names:
             if inc and not _match_any(name, inc):
                 continue
             if exc and _match_any(name, exc):
@@ -260,11 +363,76 @@ class Runners:
                 body = _git(self.dir, "show", f"{ref}:{name}")
             except (UnicodeDecodeError, AgentFailed):
                 continue
+            if "\0" in body:
+                continue
+            filtered.append(name)
+            bodies[name] = body
+
+        full_set: set[str] = set()
+        priority_order: list[str] = []
+        if focused and task is not None:
+            named_files, focus_dirs = _task_named_paths(task, filtered)
+            same_dir_sources = {
+                n for n in filtered
+                if posixpath.dirname(_norm(n)) in focus_dirs and not _is_test_file(n)
+            }
+            full_set = set(named_files) | same_dir_sources
+            used_idents: set[str] = set()
+            for n in full_set:
+                used_idents.update(IDENT_TOKEN.findall(bodies.get(n, "")))
+            used_idents.update(IDENT_TOKEN.findall(f"{task.title}\n" + "\n".join(task.fields.values())))
+            helper_files = {
+                n for n in filtered
+                if n not in full_set and (_declared_identifiers(bodies[n]) & used_idents)
+            }
+            full_set |= helper_files
+            priority_order = (
+                [n for n in filtered if n in named_files]
+                + [n for n in filtered if n in same_dir_sources and n not in named_files]
+                + [n for n in filtered if n in helper_files]
+            )
+
+        first_set = set(first) | set(priority_order)
+        rank = {n: idx for idx, n in enumerate(priority_order)}
+        ordered = sorted(
+            filtered,
+            key=lambda n: (0 if n in rank else (1 if n in first_set else 2), rank.get(n, 0)),
+        )
+
+        out: list[str] = []
+        used = 0
+        omitted: list[str] = []
+        decl_only_count = 0
+        for name in ordered:
+            body = bodies[name]
+            if focused and name not in full_set:
+                decls = _extract_declarations(body)
+                header = f"--- {name} (declarations only; non-focus file)"
+                entry = f"{header}\n{decls}" if decls else f"{header}\n(no top-level declarations)"
+                cost = len(decls)
+                if used + cost > cap:
+                    omitted.append(name)
+                    out.append(f"--- {name} (omitted, size cap)")
+                    continue
+                used += cost
+                decl_only_count += 1
+                out.append(entry)
+                continue
             if used + len(body) > cap:
+                omitted.append(name)
                 out.append(f"--- {name} (omitted, size cap)")
                 continue
             used += len(body)
             out.append(f"--- {name}\n{body}")
+        if focused and decl_only_count:
+            out.insert(
+                0,
+                "Focused snapshot: full text is shown for task Inputs/Outputs, sibling source files in the same "
+                "directories, and files defining helpers they use; other tracked files show declaration lines only "
+                "(func, type, var, const, def, class, interface, plus their preceding comment line).",
+            )
+        if omitted:
+            out.insert(0, "Files omitted for size (not shown below): " + ", ".join(omitted))
         return "\n".join(out)
 
     def _touched_context(self, branch: str) -> str:
@@ -362,11 +530,10 @@ class Runners:
     # agents
 
     def planner(self) -> str:
-        return self.wrapper.call(
-            self._prompt("planner", constitution=self.doc_text("constitution"), spec=self.doc_text("spec"),
-                         plan=self.doc_text("plan"), project_yaml=self._read("project.yaml")),
-            bounded=False,
-            role="planner",
+        return self._call_role(
+            "planner", bounded=False,
+            constitution=self.doc_text("constitution"), spec=self.doc_text("spec"),
+            plan=self.doc_text("plan"), project_yaml=self._read("project.yaml"),
         ).text
 
     def _dev_mode(self) -> str:
@@ -383,15 +550,19 @@ class Runners:
         return self._developer_diff(task, notes)
 
     def _developer_diff(self, task: Task, notes: str = "") -> str:
-        prompt = self._prompt(
+        result = self._call_role(
             "developer",
-            constitution=self.doc_text("constitution"), spec=self.doc_text("spec"), plan=self.doc_text("plan"),
-            task=self._task_text(task), notes_from_previous_attempt=notes, repository=self._snapshot(),
-            **self._rejected_attempt(),
+            bounded=task.bounded,
+            constitution=self.doc_text("constitution"),
+            spec=self.doc_text("spec"),
+            plan=self.doc_text("plan"),
+            repository=self._snapshot(task=task),
             output_format="Reply with ONE unified diff in a ```diff fenced block (paths relative to the repo root, "
                           "git apply compatible), then a one paragraph note. No other code blocks.",
+            task=self._task_text(task),
+            notes_from_previous_attempt=notes,
+            **self._rejected_attempt(),
         )
-        result = self.wrapper.call(prompt, bounded=task.bounded, role="developer")
         self.record("developer-reply.md", result.text)
         m = DIFF_BLOCK.search(result.text)
         if not m:
@@ -421,19 +592,23 @@ class Runners:
         branch = self.task_branch(task)
         cmds = self.cfg.get("commands") or {}
         cmd_hint = "\n".join(f"{k}: {v}" for k, v in cmds.items() if v)
-        prompt = self._prompt(
-            "developer",
-            constitution=self.doc_text("constitution"), spec=self.doc_text("spec"), plan=self.doc_text("plan"),
-            task=self._task_text(task), commands=cmd_hint, notes_from_previous_attempt=notes, **self._rejected_attempt(),
-            instructions="You are working inside an isolated git worktree for this task. Edit files directly using your "
-                         "tools. Do NOT run git commit, git checkout, or git merge (the orchestrator commits your "
-                         "work). Do NOT touch protected paths. Reply with a short summary of what changed and which "
-                         "requirement IDs it satisfies.",
-        )
         with self._worktree(branch, create=True, start=self.integ) as wt:
             assert self.agent_runner is not None
-            result = self.wrapper.call(
-                prompt, bounded=task.bounded, primary=lambda p: self.agent_runner(p, str(wt)), role="developer",
+            result = self._call_role(
+                "developer",
+                bounded=task.bounded,
+                primary=lambda p: self.agent_runner(p, str(wt)),
+                constitution=self.doc_text("constitution"),
+                spec=self.doc_text("spec"),
+                plan=self.doc_text("plan"),
+                commands=cmd_hint,
+                instructions="You are working inside an isolated git worktree for this task. Edit files directly using your "
+                             "tools. Do NOT run git commit, git checkout, or git merge (the orchestrator commits your "
+                             "work). Do NOT touch protected paths. Reply with a short summary of what changed and which "
+                             "requirement IDs it satisfies.",
+                task=self._task_text(task),
+                notes_from_previous_attempt=notes,
+                **self._rejected_attempt(),
             )
             self.record("developer-reply.md", result.text)
             changed = self._changed_paths_in_worktree(wt)
@@ -530,14 +705,17 @@ class Runners:
         return True, ""
 
     def reviewer(self, task: Task, branch: str) -> tuple[bool, str]:
-        """Fresh context: diff, touched files, task, constitution, spec. No developer notes."""
+        """Fresh context: constitution, spec, touched files, diff, task. No developer notes."""
         diff = _git(self.dir, "diff", f"{self.integ}...{branch}")
         touched = self._touched_context(branch)
-        text = self.wrapper.call(
-            self._prompt("reviewer", constitution=self.doc_text("constitution"), spec=self.doc_text("spec"),
-                         task=self._task_text(task), diff=diff, touched_files=touched),
+        text = self._call_role(
+            "reviewer",
             bounded=False,
-            role="reviewer",
+            constitution=self.doc_text("constitution"),
+            spec=self.doc_text("spec"),
+            touched_files=touched,
+            diff=diff,
+            task=self._task_text(task),
         ).text
         self.record("reviewer-reply.md", text)
         if parse_verdict(text):
@@ -579,14 +757,31 @@ class Runners:
                 return False, f"merge conflict into {self.integ}:\n{text}"
             return True, ""
 
-    def gap_analyzer(self) -> str:
+    def _evidence_text(self) -> str:
+        """Per task dir under logs/evidence: exit code plus the last 1500 chars of stdout and stderr, inline."""
         ev = self.dir / "logs" / "evidence"
-        files = "\n".join(str(f.relative_to(self.dir)) for f in sorted(ev.rglob("*")) if f.is_file()) if ev.exists() else ""
-        return self.wrapper.call(
-            self._prompt("gap-analyzer", spec=self.doc_text("spec"), plan=self.doc_text("plan"),
-                         tasks=self._read("tasks.md"), evidence_files=files, repository=self._snapshot()),
+        parts = []
+        for d in sorted(p for p in ev.glob("*") if p.is_dir()) if ev.exists() else []:
+            def tail(name):
+                f = d / name
+                return f.read_text(errors="replace")[-1500:] if f.exists() else "(missing)"
+            parts.append(f"--- {d.name}\nexit code: {tail('exit_code.txt').strip()}\n"
+                         f"stdout (last 1500 chars):\n{tail('stdout.txt')}\nstderr (last 1500 chars):\n{tail('stderr.txt')}")
+        return "\n".join(parts)
+
+    def gap_analyzer(self) -> str:
+        tasks = self._read("tasks.md")
+        outputs = " ".join(t.fields.get("Outputs", "") for t in parse_tasks(tasks))
+        tree = _git(self.dir, "ls-tree", "-r", "--name-only", self._tip()).splitlines()
+        named = [n for n in tree if n in outputs]  # files a task Outputs line names
+        return self._call_role(
+            "gap-analyzer",
             bounded=False,
-            role="gap-analyzer",
+            spec=self.doc_text("spec"),
+            plan=self.doc_text("plan"),
+            repository=self._snapshot(named),
+            tasks=tasks,
+            evidence=self._evidence_text(),
         ).text
 
     # git worktree helpers

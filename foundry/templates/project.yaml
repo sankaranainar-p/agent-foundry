@@ -41,6 +41,7 @@ agents:
 
 # Optional context settings for repo snapshots and document sources.
 context:
+  mode: full                    # full (default) | focused (full text for task files, sibling sources, and helper files; declarations only for the rest)
   max_chars: 60000
   include: []                   # fnmatch globs; empty means all tracked files
   exclude:                      # fnmatch globs skipped from repo snapshots

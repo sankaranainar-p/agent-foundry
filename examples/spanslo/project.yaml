@@ -37,6 +37,7 @@ agents:
       - Grep
 
 context:
+  mode: focused
   max_chars: 120000
   include:
     - "core/*"

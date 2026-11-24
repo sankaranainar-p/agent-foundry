@@ -37,6 +37,17 @@ def _split_audit(text: str) -> tuple[str, str]:
     return text[:m.start()].rstrip() + "\n", text[m.start():].lstrip()
 
 
+def _bad_audit_reply(text: str) -> str:
+    """Reason the reply is not a gap report, or "" when it looks like one."""
+    if "<invoke" in text or "<parameter" in text:
+        return "contains tool call text"
+    if not re.search(r"(?m)^#\s+Gap Report\b", text):
+        return 'no "# Gap Report" heading'
+    if not re.search(r"(?m)^\s*\|.*\bR-\d+\b.*\|", text):
+        return "no table rows with requirement IDs"
+    return ""
+
+
 def main(argv=None, providers=None, agent_runner=None) -> int:
     ap = argparse.ArgumentParser(prog="foundry")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -79,6 +90,12 @@ def main(argv=None, providers=None, agent_runner=None) -> int:
 
     if args.cmd == "audit":
         reply = runners.gap_analyzer()
+        if reason := _bad_audit_reply(reply):
+            raw = project / "logs" / "gap-analyzer-reply.md"
+            raw.parent.mkdir(parents=True, exist_ok=True)
+            raw.write_text(reply)
+            print(f"gap analyzer reply rejected: {reason}; raw reply in {raw}", file=sys.stderr)
+            return 1
         gap_text, lot_text = _split_audit(reply)
         gap_path = project / "logs" / "gap-report.md"
         gap_path.parent.mkdir(parents=True, exist_ok=True)

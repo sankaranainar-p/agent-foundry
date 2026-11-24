@@ -329,3 +329,136 @@ def test_planner_prompt_demands_reply_only_no_files(proj):
 
     text = (AGENTS / "planner.md").read_text()
     assert "complete contents of tasks.md and nothing else" in text and "do not use /tmp" in text
+
+
+def test_gap_analyzer_prompt_has_inline_evidence_and_outputs_files(proj):
+    ev = proj / "logs" / "evidence" / "T-001"
+    ev.mkdir(parents=True)
+    (ev / "stdout.txt").write_text("X" * 2000 + "TAIL-OUT")
+    (ev / "stderr.txt").write_text("TAIL-ERR")
+    (ev / "exit_code.txt").write_text("3\n")
+    prompts = []
+    r, _ = runners(proj, lambda p: prompts.append(p) or "")
+    r.gap_analyzer()
+    p = prompts[0]
+    assert "exit code: 3" in p and "TAIL-OUT" in p and "TAIL-ERR" in p
+    assert "X" * 1492 + "TAIL-OUT" in p and "X" * 1493 not in p  # exactly the last 1500 chars
+
+
+def test_snapshot_puts_named_files_first_and_lists_omitted(proj):
+    (proj / "a.txt").write_text("a" * 60)
+    (proj / "core.go").write_text("c" * 60)
+    git(proj, "add", "-A")
+    git(proj, "commit", "-q", "-m", "x")
+    r, _ = runners(proj, lambda p: "")
+    r.cfg["context"] = {"max_chars": 80, "exclude": []}
+    snap = r._snapshot(first=["core.go"])
+    assert "--- core.go\n" + "c" * 60 in snap
+    assert "Files omitted for size" in snap and "a.txt" in snap.splitlines()[0]
+
+
+def test_cli_audit_rejects_tool_call_reply(proj, capsys):
+    gap = proj / "logs" / "gap-report.md"
+    gap.parent.mkdir(exist_ok=True)
+    gap.write_text("OLD")
+    bad = '# Gap Report\n| R-001 | met |\n<invoke name="Read"><parameter name="p">x</parameter></invoke>'
+    assert main(["audit", str(proj)], providers=(lambda p: bad, lambda p: "", "m")) == 1
+    assert gap.read_text() == "OLD"
+    assert (proj / "logs" / "gap-analyzer-reply.md").read_text() == bad
+    assert "tool call" in capsys.readouterr().err
+    for bad in ("just prose", "# Gap Report\nno table here"):
+        assert main(["audit", str(proj)], providers=(lambda p: bad, lambda p: "", "m")) == 1
+        assert gap.read_text() == "OLD"
+
+
+def test_snapshot_focused_mode_includes_full_for_task_siblings_and_helpers_and_decls_for_rest(proj):
+    (proj / "core").mkdir()
+    (proj / "other").mkdir()
+    (proj / "core" / "index.go").write_text(
+        "package core\n\n// IndexSpans indexes spans.\nfunc IndexSpans() {\n\t_ = BuildFixtureSpan()\n\t FOCUS_BODY_LINE := 1\n}\n"
+    )
+    (proj / "core" / "sibling.go").write_text(
+        "package core\n\n// SiblingType is in the same dir.\ntype SiblingType struct {\n\tSIBLING_BODY_FIELD int\n}\n"
+    )
+    (proj / "core" / "helpers_test.go").write_text(
+        "package core\n\n// BuildFixtureSpan builds a test span used by focus files.\nfunc BuildFixtureSpan() int {\n\tHELPER_BODY_MARKER := 42\n\treturn HELPER_BODY_MARKER\n}\n"
+    )
+    (proj / "core" / "unrelated_test.go").write_text(
+        "package core\n\n// TestUnrelated tests something else.\nfunc TestUnrelated() {\n\tUNRELATED_TEST_BODY := 99\n}\n"
+    )
+    (proj / "other" / "util.py").write_text(
+        "# OtherUtility comment\ndef OtherUtility():\n    OTHER_PY_BODY = 'secret'\n    return OTHER_PY_BODY\n"
+    )
+    git(proj, "add", "-A")
+    git(proj, "commit", "-q", "-m", "add files for focused snapshot")
+
+    t = parse_tasks(
+        "# Tasks\n\n## T-001: Update index\nSatisfies: R-001\nInputs: core/index.go\n"
+        "Outputs: core/index.go\nDone when: works\nAllowed models: Claude\nStatus: open\n"
+    )[0]
+    r, _ = runners(proj, lambda p: "")
+    r.cfg["context"] = {"mode": "focused", "max_chars": 60000}
+    snap = r._snapshot(task=t)
+
+    # Notice at top explaining focused mode and declaration-only files.
+    assert "Focused snapshot:" in snap and "declaration lines only" in snap
+    # 1. Named file in Inputs/Outputs has full body.
+    assert "FOCUS_BODY_LINE := 1" in snap
+    # 2. Sibling non-test source file in the same directory has full body.
+    assert "SIBLING_BODY_FIELD int" in snap
+    # 3. Test file defining a helper identifier (BuildFixtureSpan) used by focus files has full body.
+    assert "HELPER_BODY_MARKER := 42" in snap
+    # 4. Unrelated test file in same dir & file in other dir show declaration + preceding comment only, no body.
+    assert "--- core/unrelated_test.go (declarations only; non-focus file)" in snap
+    assert "// TestUnrelated tests something else.\nfunc TestUnrelated() {" in snap
+    assert "UNRELATED_TEST_BODY" not in snap
+    assert "--- other/util.py (declarations only; non-focus file)" in snap
+    assert "# OtherUtility comment\ndef OtherUtility():" in snap
+    assert "OTHER_PY_BODY" not in snap
+
+
+def test_prompts_put_fixed_sections_first_and_task_and_retry_notes_last_and_log_section_sizes(proj):
+    prompts = []
+
+    def claude(prompt):
+        prompts.append(prompt)
+        if "Agent 2: PR Reviewer" in prompt:
+            return "VERDICT: CHANGES REQUESTED\n1. hello.txt:1 missing test" if len(prompts) == 2 else "VERDICT: APPROVE\nok"
+        return DIFF
+
+    assert main(["run", str(proj), "--no-wait"], providers=(claude, lambda p: "", "m")) == 0
+    # Attempt 2 developer prompt has constitution, spec, plan, repository, output format BEFORE task and retry notes.
+    dev_retry_prompt = prompts[2]
+    order = [
+        dev_retry_prompt.index("=== constitution ==="),
+        dev_retry_prompt.index("=== spec ==="),
+        dev_retry_prompt.index("=== plan ==="),
+        dev_retry_prompt.index("=== repository ==="),
+        dev_retry_prompt.index("=== output format ==="),
+        dev_retry_prompt.index("=== task ==="),
+        dev_retry_prompt.index("=== notes from previous attempt ==="),
+        dev_retry_prompt.index("=== Rejected attempt:"),
+    ]
+    assert order == sorted(order)
+
+    # Reviewer prompt has constitution, spec, touched files, diff BEFORE task.
+    rev_prompt = prompts[1]
+    rev_order = [
+        rev_prompt.index("=== constitution ==="),
+        rev_prompt.index("=== spec ==="),
+        rev_prompt.index("=== touched files ==="),
+        rev_prompt.index("=== diff ==="),
+        rev_prompt.index("=== task ==="),
+    ]
+    assert rev_order == sorted(rev_order)
+
+    # calls.jsonl logs prompt size by section (`section_chars`) on every call.
+    calls = [json.loads(line) for line in (proj / "logs" / "calls.jsonl").read_text().splitlines()]
+    assert len(calls) == 4
+    dev_sec = calls[2]["section_chars"]
+    for key in ("role", "constitution", "spec", "plan", "repository", "task", "notes from previous attempt"):
+        assert dev_sec[key] > 0
+    rev_sec = calls[1]["section_chars"]
+    for key in ("role", "constitution", "spec", "touched files", "diff", "task"):
+        assert rev_sec[key] > 0
+
