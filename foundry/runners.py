@@ -79,6 +79,14 @@ def _is_test_file(path: str) -> bool:
     )
 
 
+SMALL_FILE_CHARS = 6_000
+SOURCE_EXTS = {".go", ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".rs", ".c", ".h", ".cc", ".cpp", ".rb", ".cs", ".kt", ".swift"}
+
+
+def _is_source_code(path: str) -> bool:
+    return posixpath.splitext(_norm(path))[1].casefold() in SOURCE_EXTS
+
+
 def _extract_declarations(body: str) -> str:
     """Keep only lines starting with func, type, var, const, def, class, or interface, plus their
     immediately preceding comment line."""
@@ -369,6 +377,7 @@ class Runners:
             bodies[name] = body
 
         full_set: set[str] = set()
+        focus_dirs: set[str] = set()
         priority_order: list[str] = []
         if focused and task is not None:
             named_files, focus_dirs = _task_named_paths(task, filtered)
@@ -403,9 +412,14 @@ class Runners:
         used = 0
         omitted: list[str] = []
         decl_only_count = 0
+        reduced: list[str] = []
         for name in ordered:
             body = bodies[name]
-            if focused and name not in full_set:
+            if focused and name not in full_set and not (
+                len(body) < SMALL_FILE_CHARS
+                or not _is_source_code(name)
+                or posixpath.dirname(_norm(name)) in focus_dirs
+            ):
                 decls = _extract_declarations(body)
                 header = f"--- {name} (declarations only; non-focus file)"
                 entry = f"{header}\n{decls}" if decls else f"{header}\n(no top-level declarations)"
@@ -416,6 +430,7 @@ class Runners:
                     continue
                 used += cost
                 decl_only_count += 1
+                reduced.append(name)
                 out.append(entry)
                 continue
             if used + len(body) > cap:
@@ -429,7 +444,8 @@ class Runners:
                 0,
                 "Focused snapshot: full text is shown for task Inputs/Outputs, sibling source files in the same "
                 "directories, and files defining helpers they use; other tracked files show declaration lines only "
-                "(func, type, var, const, def, class, interface, plus their preceding comment line).",
+                "(func, type, var, const, def, class, interface, plus their preceding comment line). "
+                "Reduced to declarations: " + ", ".join(reduced),
             )
         if omitted:
             out.insert(0, "Files omitted for size (not shown below): " + ", ".join(omitted))

@@ -389,6 +389,7 @@ def test_snapshot_focused_mode_includes_full_for_task_siblings_and_helpers_and_d
     (proj / "other" / "util.py").write_text(
         "# OtherUtility comment\ndef OtherUtility():\n    OTHER_PY_BODY = 'secret'\n    return OTHER_PY_BODY\n"
     )
+    (proj / "other" / "util.py").write_text((proj / "other" / "util.py").read_text() + "# pad\n" * 2000)
     git(proj, "add", "-A")
     git(proj, "commit", "-q", "-m", "add files for focused snapshot")
 
@@ -409,12 +410,33 @@ def test_snapshot_focused_mode_includes_full_for_task_siblings_and_helpers_and_d
     # 3. Test file defining a helper identifier (BuildFixtureSpan) used by focus files has full body.
     assert "HELPER_BODY_MARKER := 42" in snap
     # 4. Unrelated test file in same dir & file in other dir show declaration + preceding comment only, no body.
-    assert "--- core/unrelated_test.go (declarations only; non-focus file)" in snap
-    assert "// TestUnrelated tests something else.\nfunc TestUnrelated() {" in snap
-    assert "UNRELATED_TEST_BODY" not in snap
+    # Every file in a focus dir stays full, tests included.
+    assert "UNRELATED_TEST_BODY := 99" in snap
     assert "--- other/util.py (declarations only; non-focus file)" in snap
     assert "# OtherUtility comment\ndef OtherUtility():" in snap
     assert "OTHER_PY_BODY" not in snap
+
+
+def test_snapshot_focused_keeps_gomod_and_focus_dir_full_and_reduces_large_unrelated(proj):
+    (proj / "cmd").mkdir()
+    (proj / "far").mkdir()
+    (proj / "go.mod").write_text("module x\n\ngo 1.22\n" + "// pad\n" * 2000)
+    (proj / "cmd" / "other.go").write_text("package main\n")
+    (proj / "cmd" / "main.go").write_text("package main\n\nfunc main() {\n\tMAIN_BODY := 1\n}\n" + "// pad\n" * 2000)
+    (proj / "far" / "big.go").write_text("package far\n\nfunc Big() {\n\tBIG_BODY := 1\n}\n" + "// pad\n" * 2000)
+    git(proj, "add", "-A")
+    git(proj, "commit", "-q", "-m", "files")
+    t = parse_tasks(
+        "# Tasks\n\n## T-001: Edit cmd\nSatisfies: R-001\nInputs: cmd/other.go\n"
+        "Outputs: cmd/other.go\nDone when: works\nAllowed models: Claude\nStatus: open\n"
+    )[0]
+    r, _ = runners(proj, lambda p: "")
+    r.cfg["context"] = {"mode": "focused", "max_chars": 200000}
+    snap = r._snapshot(task=t)
+    assert "--- go.mod\n" in snap
+    assert "--- cmd/main.go\n" in snap and "MAIN_BODY := 1" in snap
+    assert "--- far/big.go (declarations only" in snap and "BIG_BODY" not in snap
+    assert "Reduced to declarations:" in snap and "far/big.go" in snap
 
 
 def test_prompts_put_fixed_sections_first_and_task_and_retry_notes_last_and_log_section_sizes(proj):
