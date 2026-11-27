@@ -2,6 +2,21 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions are not stable before 1.0.
 
+## [0.1.1] - 2026-11-27
+
+Fixes for four problems found while building spanslo.
+
+### Added
+- `run --sync-main`: merges `main` into `foundry/integration` with a normal merge commit, inside a worktree. Your checked out branch is not touched. A merge conflict stops the run with exit code 1 and the git output.
+- A blocked task now saves its last reviewer notes and verify output to `logs/<task>/blocked-notes.md`. The next run of that task adds them to the developer prompt under "Previous attempt notes", capped at 4000 characters. The file is removed when the task is done.
+- A `snapshot_warning` event in `logs/calls.jsonl`, and a warning on stderr, when the context settings drop or reduce a file that the task names in Inputs or Satisfies.
+- Gap Analyzer status `not proven`.
+
+### Changed
+- `run` now exits 1 when `foundry/integration` is behind `main`, and says how many commits and to re-run with `--sync-main`. Before, it ran on a stale branch. If you relied on that, sync once, or pass `--sync-main`.
+- A task whose named file is dropped or reduced in the snapshot is blocked at once, before any model call, with a message to raise `context.max_chars` or change the context settings. Before, the model ran on a cut file and the task failed after retries.
+- Gap Analyzer: for a CLI command or user visible requirement, unit tests alone are not proof. It must cite an end to end evidence file under `logs/evidence/`, or mark the requirement `not proven`.
+
 ## [0.1.0] - 2026-11-26
 
 First public release. It was used to build the first release of [spanslo](https://github.com/sankaranainar-p/spanslo) (weeks 5 to 8 of its plan).

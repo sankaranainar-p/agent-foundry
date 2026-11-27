@@ -29,6 +29,10 @@ class AgentFailed(Exception):
     """An agent produced unusable output (no diff, patch does not apply). Routes back to the
     developer as notes, like a review failure."""
 
+
+class SnapshotError(Exception):
+    """A task-named file was dropped or reduced in the snapshot; fail fast without retrying."""
+
 Developer = Callable[[Task, str], str]
 Reviewer = Callable[[Task, str], tuple[bool, str]]
 Tester = Callable[[Task, str], tuple[bool, str]]
@@ -107,6 +111,12 @@ def run_task(
                     return Outcome(task.id, "blocked", attempt, merge_notes)
                 emit("  merged into integration branch")
             return Outcome(task.id, "done", attempt)
+        except SnapshotError as e:
+            msg = str(e)
+            emit(f"  {stage} failed: {msg}")
+            record("failure.txt", msg)
+            record("notes.txt", msg)
+            return Outcome(task.id, "blocked", attempt, msg)
         except AgentFailed as e:
             notes = str(e)
             emit(f"  {stage} failed: {notes}")

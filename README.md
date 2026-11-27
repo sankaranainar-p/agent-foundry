@@ -5,7 +5,7 @@
 
 A generic, spec-driven software factory for AI agents. A reviewed spec goes in. Verified code comes out.
 
-**Status: v0.1.0, early.** It built the first release of [spanslo](https://github.com/sankaranainar-p/spanslo) end to end. Interfaces can change before 1.0. See [Limits](#limits).
+**Status: v0.1.1, early.** It built the first release of [spanslo](https://github.com/sankaranainar-p/spanslo) end to end. Interfaces can change before 1.0. See [Limits](#limits).
 
 Design and analysis happen up front with [EGM](https://github.com/google/elephant-goldfish-model) (elephant and goldfish) and, optionally, GitHub Spec Kit. Then a pipeline of agents builds, verifies, reviews, tests, and audits the work inside isolated git worktrees, and survives rate limits without losing state.
 
@@ -90,7 +90,7 @@ examples/     worked example (spanslo)
 
 ```bash
 python -m foundry plan <project_dir>                              # writes tasks.proposed.md and validates it
-python -m foundry run <project_dir> [--milestone M] [--no-wait]   # works the queue; sleeps through rate limits unless --no-wait
+python -m foundry run <project_dir> [--milestone M] [--no-wait] [--sync-main]   # works the queue; sleeps through rate limits unless --no-wait
 python -m foundry audit <project_dir>                             # runs the Gap Analyzer -> logs/gap-report.md (+ logs/parking-lot.md)
 ```
 
@@ -111,10 +111,9 @@ python -m foundry audit <project_dir>                             # runs the Gap
 - `has_ui: true` (Playwright browser flows) is not implemented. It raises `NotImplementedError`.
 - It reads your repository and sends it to model providers. Do not run it on code you may not share.
 - Runs use your own Claude subscription or key. A large milestone can hit limits and pause for hours. The spanslo pilot cost roughly 64 US dollars in model usage across its milestones.
-- The size cap can cut a file a task needs. Name the paths in the task Inputs.
-- A blocked task does not carry the reviewer notes into its next run.
-- The Gap Analyzer can accept unit tests as proof for a requirement that needs an end to end run.
-- You keep `main` and `foundry/integration` in step. Sync main into the integration branch before a run.
+- If the size cap cuts a file a task names, the task is blocked before any model call. Name the paths a task needs in its Inputs, or raise `context.max_chars`.
+- `run` stops if `foundry/integration` is behind `main`. Pass `--sync-main`, or merge it yourself.
+- The Gap Analyzer is a model. It follows the end to end evidence rule, but you still read its report.
 - The output is code a model wrote and a model reviewed. You still review and merge it.
 
 ## Rules

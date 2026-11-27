@@ -24,7 +24,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from .orchestrator import AgentFailed
+from .orchestrator import AgentFailed, SnapshotError
 from .tasks import Task, parse_tasks
 from .wrapper import TIER_PRIMARY, ModelWrapper
 
@@ -32,6 +32,8 @@ AGENTS = Path(__file__).resolve().parent / "agents"
 SNAPSHOT_CHARS = 60_000
 INTEGRATION = "foundry/integration"
 REJECTED_HEADING = "Rejected attempt: do not reapply as is; fix the cause"
+BLOCKED_NOTES_HEADING = "Previous attempt notes"
+BLOCKED_NOTES_CHARS = 4_000
 SIBLING_CHARS = 40_000
 REJECTED_DIFF_CHARS = 20 * 1024
 COMMAND_TIMEOUT_DEFAULT = 300
@@ -140,6 +142,26 @@ def _task_named_paths(task: Task, tracked: Iterable[str]) -> tuple[set[str], set
     return files, dirs
 
 
+def _task_required_paths(task: Task, tracked: Iterable[str]) -> list[str]:
+    """Tracked repo files named in the task's Inputs or Satisfies fields (in order, deduplicated)."""
+    raw = f"{task.fields.get('Inputs', '')}\n{task.fields.get('Satisfies', '')}"
+    tracked_list = list(tracked)
+    tracked_norm = {_norm(p): p for p in tracked_list}
+    found: list[str] = []
+    seen: set[str] = set()
+    for p in tracked_list:
+        np = _norm(p)
+        if np and re.search(rf"(?<![A-Za-z0-9_./-]){re.escape(np)}(?![A-Za-z0-9_./-])", raw) and p not in seen:
+            found.append(p)
+            seen.add(p)
+    for tok in PATH_TOKEN.findall(raw):
+        nt = _norm(tok.strip(".,;:()[]`\"'"))
+        if nt in tracked_norm and tracked_norm[nt] not in seen:
+            found.append(tracked_norm[nt])
+            seen.add(tracked_norm[nt])
+    return found
+
+
 def _git(cwd: Path, *args: str, check: bool = True) -> str:
     p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
     if check and p.returncode != 0:
@@ -244,11 +266,13 @@ class Runners:
         wrapper: ModelWrapper,
         cfg: dict,
         agent_runner: Optional[Callable[[str, str], str]] = None,
+        emit: Callable[[str], None] = lambda msg: None,
     ):
         self.dir = Path(project_dir)
         self.wrapper = wrapper
         self.cfg = cfg
         self.agent_runner = agent_runner
+        self.emit = emit
         self._attempt_dir: Optional[Path] = None
         self._prev_dir: Optional[Path] = None
         self.integ = INTEGRATION
@@ -265,6 +289,46 @@ class Runners:
     def record(self, name: str, text: str) -> None:
         if self._attempt_dir:
             (self._attempt_dir / name).write_text(text)
+
+    def _blocked_notes_path(self, task_id: str) -> Path:
+        return self.dir / "logs" / task_id / "blocked-notes.md"
+
+    def save_blocked_notes(self, task_id: str, attempts: int, fallback_notes: str = "") -> Path:
+        """Save the last attempt's reviewer notes and verify output to logs/<task-id>/blocked-notes.md."""
+        attempt_dir = self.dir / "logs" / task_id / f"attempt-{attempts}"
+        parts: list[str] = []
+        rev = attempt_dir / "reviewer-reply.md"
+        if rev.exists() and (text := rev.read_text().strip()):
+            parts.append(f"## Reviewer notes\n{text}")
+        ver = attempt_dir / "verify.txt"
+        if ver.exists() and (text := ver.read_text().strip()):
+            parts.append(f"## Verify output\n{text}")
+        if not parts:
+            nt = attempt_dir / "notes.txt"
+            text = nt.read_text().strip() if nt.exists() else fallback_notes.strip()
+            if text:
+                parts.append(text)
+        path = self._blocked_notes_path(task_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n\n".join(parts) + ("\n" if parts else ""))
+        return path
+
+    def clear_blocked_notes(self, task_id: str) -> None:
+        """Remove logs/<task-id>/blocked-notes.md once the task is done."""
+        self._blocked_notes_path(task_id).unlink(missing_ok=True)
+
+    def _blocked_notes_section(self, task: Task) -> dict[str, str]:
+        """Load logs/<task-id>/blocked-notes.md for the developer prompt, capped at BLOCKED_NOTES_CHARS."""
+        path = self._blocked_notes_path(task.id)
+        if not path.exists():
+            return {}
+        text = path.read_text().strip()
+        if not text:
+            return {}
+        if len(text) > BLOCKED_NOTES_CHARS:
+            suffix = "\n[truncated]"
+            text = text[: BLOCKED_NOTES_CHARS - len(suffix)] + suffix
+        return {BLOCKED_NOTES_HEADING: text}
 
     # prompt and context building
 
@@ -413,6 +477,7 @@ class Runners:
         omitted: list[str] = []
         decl_only_count = 0
         reduced: list[str] = []
+        full_included: set[str] = set()
         for name in ordered:
             body = bodies[name]
             if focused and name not in full_set and not (
@@ -438,7 +503,32 @@ class Runners:
                 out.append(f"--- {name} (omitted, size cap)")
                 continue
             used += len(body)
+            full_included.add(name)
             out.append(f"--- {name}\n{body}")
+        if task is not None:
+            reduced_set = set(reduced)
+            problems: list[tuple[str, str]] = []
+            for req in _task_required_paths(task, names):
+                if req in reduced_set:
+                    problems.append((req, "reduced"))
+                elif req not in full_included:
+                    problems.append((req, "dropped"))
+            if problems:
+                for fname, status in problems:
+                    self.wrapper.log_event({
+                        "event": "snapshot_warning",
+                        "level": "warning",
+                        "task_id": task.id,
+                        "file": fname,
+                        "status": status,
+                        "message": f"snapshot warning ({task.id}): {fname} {status}",
+                    })
+                    self.emit(f"  warning: snapshot {status} {fname}")
+                summary = ", ".join(f"{fname} ({status})" for fname, status in problems)
+                raise SnapshotError(
+                    f"snapshot incomplete for {task.id}: task-named file(s) not included in full: {summary}. "
+                    "Increase context.max_chars or adjust context settings."
+                )
         if focused and decl_only_count:
             out.insert(
                 0,
@@ -497,6 +587,35 @@ class Runners:
         """Create foundry/integration from the base branch, or reuse it."""
         if self._tip() == self.base:
             _git(self.dir, "branch", self.integ, self.base)
+
+    def _main_branch(self) -> str:
+        """Local `main` branch if present, else the base branch."""
+        if _git(self.dir, "rev-parse", "--verify", "--quiet", "refs/heads/main", check=False).strip():
+            return "main"
+        return self.base
+
+    def behind_main(self) -> int:
+        """Number of commits on main that foundry/integration lacks."""
+        main_ref = self._main_branch()
+        if not main_ref or not _git(self.dir, "rev-parse", "--verify", "--quiet", self.integ, check=False).strip():
+            return 0
+        out = _git(self.dir, "rev-list", "--count", f"{self.integ}..{main_ref}", check=False).strip()
+        return int(out) if out.isdigit() else 0
+
+    def sync_main(self) -> tuple[bool, str]:
+        """Merge main into foundry/integration with a normal merge commit inside a worktree,
+        never touching the user's checked-out branch."""
+        main_ref = self._main_branch()
+        with self._worktree(self.integ) as wt:
+            p = subprocess.run(
+                ["git", "merge", "--no-ff", "-m", f"Merge {main_ref} into {self.integ}", main_ref],
+                cwd=wt, capture_output=True, text=True,
+            )
+            if p.returncode != 0:
+                text = (p.stdout + p.stderr)[:2000]
+                _git(wt, "merge", "--abort", check=False)
+                return False, f"merge conflict syncing {main_ref} into {self.integ}:\n{text}"
+            return True, ""
 
     def integration_line(self) -> str:
         n = _git(self.dir, "rev-list", "--merges", "--count", f"{self.base}..{self.integ}", check=False).strip() or "0"
@@ -576,6 +695,7 @@ class Runners:
             output_format="Reply with ONE unified diff in a ```diff fenced block (paths relative to the repo root, "
                           "git apply compatible), then a one paragraph note. No other code blocks.",
             task=self._task_text(task),
+            **self._blocked_notes_section(task),
             notes_from_previous_attempt=notes,
             **self._rejected_attempt(),
         )
@@ -623,6 +743,7 @@ class Runners:
                              "work). Do NOT touch protected paths. Reply with a short summary of what changed and which "
                              "requirement IDs it satisfies.",
                 task=self._task_text(task),
+                **self._blocked_notes_section(task),
                 notes_from_previous_attempt=notes,
                 **self._rejected_attempt(),
             )

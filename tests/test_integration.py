@@ -112,3 +112,53 @@ def test_retry_after_rejected_review_starts_fresh_branch_and_merges_once(proj):
     assert git(proj, "show", "foundry/integration:hello.txt") == "bye\n"
     assert git(proj, "rev-list", "--merges", "--count", "main..foundry/integration").strip() == "1"
     assert parse_tasks((proj / "tasks.md").read_text())[0].status == "done"
+
+
+def test_run_stops_when_integration_is_behind_main(proj, capsys):
+    git(proj, "branch", "foundry/integration", "main")
+    (proj / "m1.txt").write_text("one\n")
+    git(proj, "add", "m1.txt")
+    git(proj, "commit", "-qm", "main commit 1")
+    (proj / "m2.txt").write_text("two\n")
+    git(proj, "add", "m2.txt")
+    git(proj, "commit", "-qm", "main commit 2")
+
+    prov = (lambda p: pytest.fail("should not call model when behind main"), lambda p: "", "m")
+    assert main(["run", str(proj), "--no-wait"], providers=prov) == 1
+    err = capsys.readouterr().err
+    assert "behind main by 2 commits" in err and "--sync-main" in err
+    assert parse_tasks((proj / "tasks.md").read_text())[0].status == "open"
+
+
+def test_run_proceeds_when_integration_is_in_sync_with_main(proj):
+    git(proj, "branch", "foundry/integration", "main")
+    prov = (lambda p: "VERDICT: APPROVE\nok" if "Agent 2: PR Reviewer" in p else DIFF, lambda p: "", "m")
+    assert main(["run", str(proj), "--no-wait"], providers=prov) == 0
+    assert parse_tasks((proj / "tasks.md").read_text())[0].status == "done"
+
+
+def test_run_sync_main_merges_in_worktree_without_touching_checked_out_branch(proj):
+    git(proj, "branch", "foundry/integration", "main")
+    (proj / "from_main.txt").write_text("latest\n")
+    git(proj, "add", "from_main.txt")
+    git(proj, "commit", "-qm", "advance main")
+
+    # Check out a separate branch with a dirty working tree to ensure --sync-main never touches it.
+    git(proj, "checkout", "-q", "-b", "user-wip")
+    (proj / "dirty.txt").write_text("uncommitted\n")
+
+    prov = (lambda p: "VERDICT: APPROVE\nok" if "Agent 2: PR Reviewer" in p else DIFF, lambda p: "", "m")
+    assert main(["run", str(proj), "--sync-main", "--no-wait"], providers=prov) == 0
+
+    assert git(proj, "rev-parse", "--abbrev-ref", "HEAD").strip() == "user-wip"
+    assert (proj / "dirty.txt").read_text() == "uncommitted\n"
+    assert git(proj, "rev-list", "--count", "foundry/integration..main").strip() == "0"
+    assert git(proj, "show", "foundry/integration:from_main.txt") == "latest\n"
+    assert git(proj, "show", "foundry/integration:hello.txt") == "hi\n"
+    # Verify a normal merge commit was created for syncing main into foundry/integration.
+    sync_sha = git(proj, "log", "--merges", "--format=%H", "-1", "--grep=^Merge main into foundry/integration$", "foundry/integration").strip()
+    assert sync_sha
+    parents = git(proj, "rev-list", "--parents", "-n", "1", sync_sha).split()
+    assert len(parents) == 3  # commit sha + 2 parents
+    assert parse_tasks((proj / "tasks.md").read_text())[0].status == "done"
+

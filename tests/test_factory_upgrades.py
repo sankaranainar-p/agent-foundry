@@ -343,6 +343,7 @@ def test_gap_analyzer_prompt_has_inline_evidence_and_outputs_files(proj):
     p = prompts[0]
     assert "exit code: 3" in p and "TAIL-OUT" in p and "TAIL-ERR" in p
     assert "X" * 1492 + "TAIL-OUT" in p and "X" * 1493 not in p  # exactly the last 1500 chars
+    assert "unit tests alone are not proof" in p and "not proven" in p and "end-to-end evidence file" in p
 
 
 def test_snapshot_puts_named_files_first_and_lists_omitted(proj):
@@ -483,4 +484,62 @@ def test_prompts_put_fixed_sections_first_and_task_and_retry_notes_last_and_log_
     rev_sec = calls[1]["section_chars"]
     for key in ("role", "constitution", "spec", "touched files", "diff", "task"):
         assert rev_sec[key] > 0
+
+
+def test_snapshot_dropped_input_file_warns_logs_and_fails_fast_before_model_call(proj, capsys):
+    (proj / "core").mkdir()
+    (proj / "core" / "big.go").write_text("package core\n// " + ("x" * 500) + "\n")
+    (proj / "tasks.md").write_text(
+        "# Tasks\n\n## T-001: Edit big\nSatisfies: R-001\nInputs: core/big.go\n"
+        "Outputs: core/big.go\nDone when: works\nAllowed models: Claude\nStatus: open\n"
+    )
+    (proj / "project.yaml").write_text(
+        'name: p\ncommands:\n  smoke: "echo ok"\nhas_ui: false\nmodels:\n  fallback: m\n'
+        "context:\n  max_chars: 100\nlimits:\n  review_retry_cap: 3\n"
+    )
+    git(proj, "add", "-A")
+    git(proj, "commit", "-qm", "add big file")
+
+    prov = (lambda p: pytest.fail("must fail fast before calling the model"), lambda p: "", "m")
+    assert main(["run", str(proj), "--no-wait"], providers=prov) == 1
+
+    err = capsys.readouterr().err
+    assert "core/big.go" in err and "dropped" in err
+    assert "T-001 start (tier: primary, attempt 2)" not in err  # failed fast without retrying
+    events = [json.loads(line) for line in (proj / "logs" / "calls.jsonl").read_text().splitlines()]
+    warns = [e for e in events if e.get("event") == "snapshot_warning"]
+    assert len(warns) == 1 and warns[0]["file"] == "core/big.go" and warns[0]["status"] == "dropped"
+    assert parse_tasks((proj / "tasks.md").read_text())[0].status == "blocked"
+
+
+def test_snapshot_reduced_satisfies_file_warns_logs_and_fails_fast_before_model_call(proj, capsys):
+    (proj / "core").mkdir()
+    (proj / "other").mkdir()
+    (proj / "core" / "index.go").write_text("package core\nfunc Index() {}\n")
+    # Large (> SMALL_FILE_CHARS) source file outside core/, referenced in Satisfies so focused mode reduces it.
+    (proj / "other" / "rules.go").write_text(
+        "package other\n// CheckRule validates rules.\nfunc CheckRule() {\n\t// " + ("r" * 7000) + "\n}\n"
+    )
+    (proj / "tasks.md").write_text(
+        "# Tasks\n\n## T-001: Wire index\nSatisfies: R-001, other/rules.go\nInputs: core/index.go\n"
+        "Outputs: core/index.go\nDone when: works\nAllowed models: Claude\nStatus: open\n"
+    )
+    (proj / "project.yaml").write_text(
+        'name: p\ncommands:\n  smoke: "echo ok"\nhas_ui: false\nmodels:\n  fallback: m\n'
+        "context:\n  mode: focused\n  max_chars: 60000\nlimits:\n  review_retry_cap: 3\n"
+    )
+    git(proj, "add", "-A")
+    git(proj, "commit", "-qm", "add rules file")
+
+    prov = (lambda p: pytest.fail("must fail fast before calling the model"), lambda p: "", "m")
+    assert main(["run", str(proj), "--no-wait"], providers=prov) == 1
+
+    err = capsys.readouterr().err
+    assert "other/rules.go" in err and "reduced" in err
+    assert "T-001 start (tier: primary, attempt 2)" not in err  # failed fast without retrying
+    events = [json.loads(line) for line in (proj / "logs" / "calls.jsonl").read_text().splitlines()]
+    warns = [e for e in events if e.get("event") == "snapshot_warning"]
+    assert len(warns) == 1 and warns[0]["file"] == "other/rules.go" and warns[0]["status"] == "reduced"
+    assert parse_tasks((proj / "tasks.md").read_text())[0].status == "blocked"
+
 

@@ -8,8 +8,8 @@ authors:
     orcid: "https://orcid.org/0009-0006-1738-3863"
 repository-code: "https://github.com/sankaranainar-p/agent-foundry"
 license: Apache-2.0
-version: 0.1.0
-date-released: 2026-11-26
+version: 0.1.1
+date-released: 2026-11-27
 keywords:
   - ai-agents
   - software-factory

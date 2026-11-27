@@ -98,3 +98,54 @@ def test_pause_and_tier_change_report_reason_and_resume_at(proj, capsys):
     err = capsys.readouterr().err
     assert "T-001 tier changed (primary rate limited mid-task; resume_at=20" in err
     assert "T-001 paused: unbounded task, primary limited; resume_at=20" in err
+
+
+def test_blocked_notes_saved_loaded_and_cleared_on_done(proj):
+    (proj / "project.yaml").write_text(
+        'name: p\ncommands:\n  test: "echo verify-passed-details"\n  smoke: "echo smoke-ok"\n'
+        "has_ui: false\nmodels:\n  fallback: m\nlimits:\n  review_retry_cap: 2\n"
+    )
+    git_cmd = __import__("subprocess").run
+    git_cmd(["git", "commit", "-qam", "add test cmd"], cwd=proj, check=True)
+
+    # First run blocks on reviewer rejection; save both reviewer notes and verify output.
+    assert main(["run", str(proj), "--no-wait"], providers=provider(lambda p: NO)) == 1
+    bn = proj / "logs" / "T-001" / "blocked-notes.md"
+    assert bn.exists()
+    saved = bn.read_text()
+    assert NO in saved and "verify-passed-details" in saved
+
+    # Reopen task and run again: developer prompt loads Previous attempt notes, then file is cleared on done.
+    (proj / "tasks.md").write_text(TASKS % "Claude")
+    dev_prompts = []
+
+    def dev(prompt):
+        dev_prompts.append(prompt)
+        return DIFF
+
+    assert main(["run", str(proj), "--no-wait"], providers=provider(lambda p: YES, dev=dev)) == 0
+    assert "=== Previous attempt notes ===" in dev_prompts[0]
+    assert NO in dev_prompts[0] and "verify-passed-details" in dev_prompts[0]
+    assert not bn.exists()
+
+
+def test_blocked_notes_capped_at_4000_chars(proj):
+    import json
+
+    bn = proj / "logs" / "T-001" / "blocked-notes.md"
+    bn.parent.mkdir(parents=True, exist_ok=True)
+    bn.write_text("X" * 6000)
+
+    dev_prompts = []
+
+    def dev(prompt):
+        dev_prompts.append(prompt)
+        return DIFF
+
+    assert main(["run", str(proj), "--no-wait"], providers=provider(lambda p: YES, dev=dev)) == 0
+    assert "=== Previous attempt notes ===" in dev_prompts[0]
+    calls = [json.loads(line) for line in (proj / "logs" / "calls.jsonl").read_text().splitlines()]
+    dev_call = next(c for c in calls if c["role"] == "developer")
+    assert dev_call["section_chars"]["Previous attempt notes"] == 4000
+    assert not bn.exists()
+

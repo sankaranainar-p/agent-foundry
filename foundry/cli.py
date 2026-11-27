@@ -1,6 +1,6 @@
-"""python -m foundry plan <project_dir> | run <project_dir> [--no-wait] [--keep-going] [--milestone M] [--quiet] | audit <project_dir>
+"""python -m foundry plan <project_dir> | run <project_dir> [--no-wait] [--keep-going] [--milestone M] [--sync-main] [--quiet] | audit <project_dir>
 
-Exit codes for run: 0 all done, 1 a task is blocked or tasks.md is invalid, 2 paused (with --no-wait)."""
+Exit codes for run: 0 all done, 1 a task is blocked, tasks.md is invalid, or the integration branch is behind main, 2 paused (with --no-wait)."""
 
 from __future__ import annotations
 
@@ -57,6 +57,8 @@ def main(argv=None, providers=None, agent_runner=None) -> int:
     r.add_argument("--no-wait", action="store_true", help="exit at the first pause instead of sleeping")
     r.add_argument("--keep-going", action="store_true", help="continue past blocked tasks (default: stop at the first)")
     r.add_argument("--milestone", default="", help="work only tasks whose Milestone field matches")
+    r.add_argument("--sync-main", action="store_true",
+                   help="merge main into foundry/integration before running")
     r.add_argument("--quiet", action="store_true", help="no progress output on stderr")
     sub.add_parser("audit").add_argument("project")
     args = ap.parse_args(argv)
@@ -106,6 +108,7 @@ def main(argv=None, providers=None, agent_runner=None) -> int:
         return 0
 
     emit = (lambda msg: None) if args.quiet else (lambda msg: print(msg, file=sys.stderr, flush=True))
+    runners.emit = emit
     tasks_path, status_path = project / "tasks.md", project / "logs" / "status.md"
     if problems := validate_tasks(tasks_path.read_text(), runners.doc_text("spec")):
         emit(f"invalid {tasks_path}:")
@@ -114,9 +117,28 @@ def main(argv=None, providers=None, agent_runner=None) -> int:
         return 1
 
     runners.ensure_integration()
+    if behind := runners.behind_main():
+        if args.sync_main:
+            ok, err = runners.sync_main()
+            if not ok:
+                print(err, file=sys.stderr)
+                return 1
+            emit(f"synced {behind} commit(s) from main into {runners.integ}")
+        else:
+            word = "commit" if behind == 1 else "commits"
+            print(
+                f"{runners.integ} is behind main by {behind} {word}. "
+                f"Re-run with --sync-main to merge main into {runners.integ}.",
+                file=sys.stderr,
+            )
+            return 1
     emit(runners.integration_line())
 
     def after(task, outcome):
+        if outcome.status == "blocked":
+            runners.save_blocked_notes(task.id, outcome.attempts, outcome.notes)
+        elif outcome.status == "done":
+            runners.clear_blocked_notes(task.id)
         wrapper.set_meta(paused_task=task.id if outcome.status == "paused" else "")
         write_status(status_path, tasks_path.read_text(), wrapper.snapshot(), (runners.integration_line(),))
 

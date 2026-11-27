@@ -130,6 +130,10 @@ class ModelWrapper:
         with self.log_path.open("a") as f:
             f.write(json.dumps(event) + "\n")
 
+    def log_event(self, event: dict) -> None:
+        """Append a structured event line (such as a snapshot warning) to calls.jsonl."""
+        self._log(dict(event))
+
     # calls
 
     @property
