@@ -1,6 +1,6 @@
 # agent-foundry
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24552599.svg)](https://doi.org/10.5281/zenodo.24552599)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24579451.svg)](https://doi.org/10.5281/zenodo.24579451)
 [![tests](https://github.com/sankaranainar-p/agent-foundry/actions/workflows/tests.yml/badge.svg)](https://github.com/sankaranainar-p/agent-foundry/actions/workflows/tests.yml)
 
 A generic, spec-driven software factory for AI agents. A reviewed spec goes in. Verified code comes out.
